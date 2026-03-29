@@ -27,13 +27,60 @@ from tennis_jupyter.analytics import (  # noqa: E402
     summarize_key_insights,
     with_season_columns,
 )
-from tennis_jupyter.constants import PIVOT_ACE_COLUMN_DEFS, SERVE_TREND_METRICS  # noqa: E402
+from tennis_jupyter.constants import (  # noqa: E402
+    COLORBLIND_SAFE_CHART_COLORS,
+    COLORBLIND_SAFE_DIVERGING_SCALE,
+    COLORBLIND_SAFE_SEQUENTIAL_SCALE,
+    PIVOT_ACE_COLUMN_DEFS,
+    SERVE_TREND_METRICS,
+)
 from tennis_jupyter.notebook import load_match_summary  # noqa: E402
 from tennis_jupyter.reporting import write_excel_report  # noqa: E402
 from tennis_jupyter.shared import safe_ratio  # noqa: E402
 
 
 st.set_page_config(page_title="Tennis Match Summary", layout="wide")
+
+st.markdown(
+    f"""
+    <style>
+        :root {{
+            --accent-red: {COLORBLIND_SAFE_CHART_COLORS["accent_red"]};
+            --accent-red-dark: {COLORBLIND_SAFE_CHART_COLORS["accent_red_dark"]};
+            --accent-gray: {COLORBLIND_SAFE_CHART_COLORS["accent_gray"]};
+            --surface-neutral: {COLORBLIND_SAFE_CHART_COLORS["surface_neutral"]};
+            --text-strong: #1f1f1f;
+        }}
+
+        .stApp {{
+            background: linear-gradient(180deg, #fffdf8 0%, var(--surface-neutral) 100%);
+            color: var(--text-strong);
+        }}
+
+        .stButton > button,
+        .stDownloadButton > button,
+        button[kind="primary"] {{
+            background: var(--accent-red);
+            border: 1px solid var(--accent-red);
+            color: #ffffff;
+        }}
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover,
+        button[kind="primary"]:hover {{
+            background: var(--accent-red-dark);
+            border-color: var(--accent-red-dark);
+            color: #ffffff;
+        }}
+
+        [data-baseweb="tab-list"] button[aria-selected="true"] {{
+            color: var(--accent-red);
+            border-bottom-color: var(--accent-red);
+        }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 @st.cache_data(show_spinner=False)
@@ -156,16 +203,30 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
                 )
             )
 
+    apply_accessible_figure_style(figure, title=title, height=500)
+    figure.update_xaxes(title_text="Match Sequence")
+    figure.update_yaxes(title_text="Rate", tickformat=".0%", range=[0, 1])
+    return figure
+
+
+def apply_accessible_figure_style(figure: go.Figure, *, title: str, height: int) -> None:
+    """Apply a colorblind-safer visual baseline to all Plotly figures."""
     figure.update_layout(
         title=title,
-        xaxis_title="Match Sequence",
-        yaxis_title="Rate",
-        yaxis_tickformat=".0%",
-        yaxis_range=[0, 1],
+        height=height,
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="#FFFDF8",
+        font={"color": "#1f1f1f"},
+        colorway=[
+            COLORBLIND_SAFE_CHART_COLORS["accent_red"],
+            COLORBLIND_SAFE_CHART_COLORS["accent_gray"],
+            COLORBLIND_SAFE_CHART_COLORS["accent_rose"],
+            COLORBLIND_SAFE_CHART_COLORS["accent_taupe"],
+            COLORBLIND_SAFE_CHART_COLORS["accent_black"],
+        ],
         legend_title="Metric",
-        height=500,
     )
-    return figure
 
 
 def build_games_diff_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str) -> go.Figure | None:
@@ -193,6 +254,7 @@ def build_games_diff_chart(chart_df: pd.DataFrame, split_by_result: bool, title:
                 y=values,
                 mode="lines+markers",
                 name=f"{name_prefix}Games Diff".strip(),
+                line={"color": COLORBLIND_SAFE_CHART_COLORS["accent_red"]},
             )
         )
         for line_value, name, dash in [
@@ -200,13 +262,18 @@ def build_games_diff_chart(chart_df: pd.DataFrame, split_by_result: bool, title:
             (ucl, "UCL", "dash"),
             (lcl, "LCL", "dash"),
         ]:
+            line_color = {
+                "CL": COLORBLIND_SAFE_CHART_COLORS["accent_black"],
+                "UCL": COLORBLIND_SAFE_CHART_COLORS["accent_gray"],
+                "LCL": COLORBLIND_SAFE_CHART_COLORS["accent_taupe"],
+            }[name]
             figure.add_trace(
                 go.Scatter(
                     x=x_values,
                     y=[line_value] * len(x_values),
                     mode="lines",
                     name=f"{name_prefix}{name}".strip(),
-                    line={"dash": dash},
+                    line={"dash": dash, "color": line_color},
                 )
             )
 
@@ -224,7 +291,9 @@ def build_games_diff_chart(chart_df: pd.DataFrame, split_by_result: bool, title:
 
     if not figure.data:
         return None
-    figure.update_layout(title=title, xaxis_title="Match Sequence", yaxis_title="Games Diff", height=500)
+    apply_accessible_figure_style(figure, title=title, height=500)
+    figure.update_xaxes(title_text="Match Sequence")
+    figure.update_yaxes(title_text="Games Diff")
     return figure
 
 
@@ -261,7 +330,10 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
 
     figure = make_subplots(rows=1, cols=2, subplot_titles=("First Serve Funnel", "Second Serve Funnel"))
     if split_by_result and "Match Result" in chart_df.columns:
-        for result_label, color in [("W", "#D14905"), ("L", "#7E0000")]:
+        for result_label, color in [
+            ("W", COLORBLIND_SAFE_CHART_COLORS["accent_red"]),
+            ("L", COLORBLIND_SAFE_CHART_COLORS["accent_gray"]),
+        ]:
             subset = chart_df[chart_df["Match Result"] == result_label]
             if subset.empty:
                 continue
@@ -282,7 +354,10 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
                 )
     else:
         first_steps, second_steps = funnel_steps(chart_df)
-        for col_index, steps, color in [(1, first_steps, "#D14905"), (2, second_steps, "#7E0000")]:
+        for col_index, steps, color in [
+            (1, first_steps, COLORBLIND_SAFE_CHART_COLORS["accent_red"]),
+            (2, second_steps, COLORBLIND_SAFE_CHART_COLORS["accent_gray"]),
+        ]:
             figure.add_trace(
                 go.Bar(
                     x=percent_values(steps),
@@ -300,7 +375,8 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
     if not figure.data:
         return None
     figure.update_xaxes(range=[0, 1.05], tickformat=".0%")
-    figure.update_layout(title=title, barmode="group", height=500)
+    apply_accessible_figure_style(figure, title=title, height=500)
+    figure.update_layout(barmode="group", legend_title="Result")
     return figure
 
 
@@ -311,7 +387,7 @@ def build_rate_heatmap(
     y_label: str,
     zmin: float,
     zmax: float,
-    colorscale: str,
+    colorscale: list[list[float | str]],
     text_matrix: list[list[str]],
 ) -> go.Figure:
     """Render a labeled heatmap."""
@@ -328,7 +404,9 @@ def build_rate_heatmap(
             hovertemplate="%{x}<br>%{y}<br>%{z:.1%}<extra></extra>",
         )
     )
-    figure.update_layout(title=title, xaxis_title=x_label, yaxis_title=y_label, height=520)
+    apply_accessible_figure_style(figure, title=title, height=520)
+    figure.update_xaxes(title_text=x_label)
+    figure.update_yaxes(title_text=y_label)
     return figure
 
 
@@ -385,7 +463,16 @@ def build_rally_profile_chart(chart_df: pd.DataFrame, split_by_result: bool, tit
             ]
             for i in range(len(labels))
         ]
-        return build_rate_heatmap(diff, title, "Short Rally Share Tier", "Long Rally Share Tier", -1, 1, "RdYlGn", text)
+        return build_rate_heatmap(
+            diff,
+            title,
+            "Short Rally Share Tier",
+            "Long Rally Share Tier",
+            -1,
+            1,
+            COLORBLIND_SAFE_DIVERGING_SCALE,
+            text,
+        )
 
     win_rate = (
         plot_df.pivot_table(index="Long Tier", columns="Short Tier", values="is_win", aggfunc="mean", observed=False)
@@ -401,7 +488,16 @@ def build_rally_profile_chart(chart_df: pd.DataFrame, split_by_result: bool, tit
         [f"{win_rate.iat[i, j]:.0%}<br>matches={int(match_counts.iat[i, j])}" for j in range(len(labels))]
         for i in range(len(labels))
     ]
-    return build_rate_heatmap(win_rate, title, "Short Rally Share Tier", "Long Rally Share Tier", 0, 1, "RdYlGn", text)
+    return build_rate_heatmap(
+        win_rate,
+        title,
+        "Short Rally Share Tier",
+        "Long Rally Share Tier",
+        0,
+        1,
+        COLORBLIND_SAFE_SEQUENTIAL_SCALE,
+        text,
+    )
 
 
 def build_set_share_heatmap(chart_df: pd.DataFrame, split_by_result: bool, title: str, left_col: str, bottom_col: str) -> go.Figure | None:
@@ -444,14 +540,32 @@ def build_set_share_heatmap(chart_df: pd.DataFrame, split_by_result: bool, title
             ]
             for i in range(len(labels))
         ]
-        return build_rate_heatmap(diff, title, bottom_col.replace(" Tier", ""), left_col.replace(" Tier", ""), -1, 1, "RdYlGn", text)
+        return build_rate_heatmap(
+            diff,
+            title,
+            bottom_col.replace(" Tier", ""),
+            left_col.replace(" Tier", ""),
+            -1,
+            1,
+            COLORBLIND_SAFE_DIVERGING_SCALE,
+            text,
+        )
 
     share = all_sets / total_sets
     text = [
         [f"{share.iat[i, j]:.0%}<br>sets={int(all_sets.iat[i, j])}" for j in range(len(labels))]
         for i in range(len(labels))
     ]
-    return build_rate_heatmap(share, title, bottom_col.replace(" Tier", ""), left_col.replace(" Tier", ""), 0, 1, "RdYlGn", text)
+    return build_rate_heatmap(
+        share,
+        title,
+        bottom_col.replace(" Tier", ""),
+        left_col.replace(" Tier", ""),
+        0,
+        1,
+        COLORBLIND_SAFE_SEQUENTIAL_SCALE,
+        text,
+    )
 
 
 def build_pressure_bins_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str) -> go.Figure | None:
@@ -527,10 +641,37 @@ def build_win_loss_chart(chart_df: pd.DataFrame, title: str) -> go.Figure | None
 
     figure = make_subplots(specs=[[{"secondary_y": True}]])
     x_values = by_year["Match Year"].astype(str).tolist()
-    figure.add_trace(go.Scatter(x=x_values, y=by_year["W"], mode="lines+markers", name="Wins"), secondary_y=False)
-    figure.add_trace(go.Scatter(x=x_values, y=by_year["L"], mode="lines+markers", name="Losses"), secondary_y=False)
-    figure.add_trace(go.Scatter(x=x_values, y=by_year["Win Rate"], mode="lines+markers", name="Win Rate"), secondary_y=True)
-    figure.update_layout(title=title, height=420)
+    figure.add_trace(
+        go.Scatter(
+            x=x_values,
+            y=by_year["W"],
+            mode="lines+markers",
+            name="Wins",
+            line={"color": COLORBLIND_SAFE_CHART_COLORS["accent_red"]},
+        ),
+        secondary_y=False,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=x_values,
+            y=by_year["L"],
+            mode="lines+markers",
+            name="Losses",
+            line={"color": COLORBLIND_SAFE_CHART_COLORS["accent_gray"]},
+        ),
+        secondary_y=False,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=x_values,
+            y=by_year["Win Rate"],
+            mode="lines+markers",
+            name="Win Rate",
+            line={"color": COLORBLIND_SAFE_CHART_COLORS["accent_black"]},
+        ),
+        secondary_y=True,
+    )
+    apply_accessible_figure_style(figure, title=title, height=420)
     figure.update_yaxes(title_text="Matches", secondary_y=False)
     figure.update_yaxes(title_text="Win Rate", tickformat=".0%", range=[0, 1], secondary_y=True)
     return figure
@@ -551,11 +692,28 @@ def build_sets_games_chart(chart_df: pd.DataFrame, title: str) -> go.Figure | No
 
     figure = make_subplots(rows=2, cols=1, shared_xaxes=True, subplot_titles=("Sets", "Games"))
     x_values = by_year["Match Year"].astype(str).tolist()
-    figure.add_trace(go.Bar(x=x_values, y=by_year["Sets Won"], name="Sets Won"), row=1, col=1)
-    figure.add_trace(go.Bar(x=x_values, y=by_year["Sets Lost"], name="Sets Lost"), row=1, col=1)
-    figure.add_trace(go.Bar(x=x_values, y=by_year["Games Won"], name="Games Won"), row=2, col=1)
-    figure.add_trace(go.Bar(x=x_values, y=by_year["Games Lost"], name="Games Lost"), row=2, col=1)
-    figure.update_layout(title=title, barmode="group", height=520)
+    figure.add_trace(
+        go.Bar(x=x_values, y=by_year["Sets Won"], name="Sets Won", marker_color=COLORBLIND_SAFE_CHART_COLORS["accent_red"]),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Bar(x=x_values, y=by_year["Sets Lost"], name="Sets Lost", marker_color=COLORBLIND_SAFE_CHART_COLORS["accent_gray"]),
+        row=1,
+        col=1,
+    )
+    figure.add_trace(
+        go.Bar(x=x_values, y=by_year["Games Won"], name="Games Won", marker_color=COLORBLIND_SAFE_CHART_COLORS["accent_rose"]),
+        row=2,
+        col=1,
+    )
+    figure.add_trace(
+        go.Bar(x=x_values, y=by_year["Games Lost"], name="Games Lost", marker_color=COLORBLIND_SAFE_CHART_COLORS["accent_black"]),
+        row=2,
+        col=1,
+    )
+    apply_accessible_figure_style(figure, title=title, height=520)
+    figure.update_layout(barmode="group", legend_title="Metric")
     return figure
 
 

@@ -18,13 +18,36 @@ MONTH_ORDER = [
     "December",
 ]
 
+COLORBLIND_SAFE_CHART_COLORS = {
+    "accent_red": "#CC0000",
+    "accent_red_dark": "#990000",
+    "accent_gray": "#6E6E6E",
+    "accent_black": "#1F1F1F",
+    "accent_rose": "#C75C5C",
+    "accent_taupe": "#9A8F87",
+    "surface_neutral": "#F7F4F2",
+}
+
+COLORBLIND_SAFE_DIVERGING_SCALE = [
+    [0.0, "#6E6E6E"],
+    [0.5, "#F7F4F2"],
+    [1.0, "#CC0000"],
+]
+
+COLORBLIND_SAFE_SEQUENTIAL_SCALE = [
+    [0.0, "#F7F4F2"],
+    [0.35, "#E0C8C8"],
+    [0.7, "#C75C5C"],
+    [1.0, "#990000"],
+]
+
 
 SERVE_TREND_METRICS = [
-    ("1st Serve In %", "first_serve_in", "first_serve_attempt", "#F8A812"),
-    ("1st Serve Won %", "first_serve_won", "first_serve_in", "#D14905"),
-    ("2nd Serve In %", "second_serve_in", "second_serve_attempt", "#E16408"),
-    ("2nd Serve Won %", "second_serve_won", "second_serve_attempt", "#CC0000"),
-    ("Double Fault %", "double_fault", "second_serve_attempt", "#7E0000"),
+    ("1st Serve In %", "first_serve_in", "first_serve_attempt", COLORBLIND_SAFE_CHART_COLORS["accent_red"]),
+    ("1st Serve Won %", "first_serve_won", "first_serve_in", COLORBLIND_SAFE_CHART_COLORS["accent_red_dark"]),
+    ("2nd Serve In %", "second_serve_in", "second_serve_attempt", COLORBLIND_SAFE_CHART_COLORS["accent_rose"]),
+    ("2nd Serve Won %", "second_serve_won", "second_serve_attempt", COLORBLIND_SAFE_CHART_COLORS["accent_gray"]),
+    ("Double Fault %", "double_fault", "second_serve_attempt", COLORBLIND_SAFE_CHART_COLORS["accent_black"]),
 ]
 
 
