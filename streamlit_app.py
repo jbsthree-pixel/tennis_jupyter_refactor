@@ -328,6 +328,14 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
         base = steps[0][1] if steps and steps[0][1] else 0.0
         return [value / base if base else 0.0 for _, value in steps]
 
+    def step_values(steps):
+        step_rates = []
+        previous = None
+        for _, value in steps:
+            step_rates.append((value / previous) if previous not in (None, 0.0) else 1.0)
+            previous = value
+        return step_rates
+
     figure = make_subplots(rows=1, cols=2, subplot_titles=("First Serve Funnel", "Second Serve Funnel"))
     if split_by_result and "Match Result" in chart_df.columns:
         for result_label, color in [
@@ -339,15 +347,28 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
                 continue
             first_steps, second_steps = funnel_steps(subset)
             for col_index, steps in [(1, first_steps), (2, second_steps)]:
+                percentages = percent_values(steps)
+                step_rates = step_values(steps)
                 figure.add_trace(
                     go.Bar(
-                        x=percent_values(steps),
+                        x=percentages,
                         y=[label for label, _ in steps],
                         orientation="h",
                         name=result_label,
                         marker_color=color,
-                        text=[f"{value:.0%}" for value in percent_values(steps)],
+                        text=[
+                            f"{pct:.0%} ({int(raw):,})" if idx == 0 else f"{pct:.0%} ({step:.0%} step)"
+                            for idx, ((_, raw), pct, step) in enumerate(zip(steps, percentages, step_rates))
+                        ],
                         textposition="outside",
+                        customdata=[[raw, pct, step] for (_, raw), pct, step in zip(steps, percentages, step_rates)],
+                        hovertemplate=(
+                            "%{y}<br>"
+                            "Result=%{fullData.name}<br>"
+                            "Share of attempts=%{customdata[1]:.0%}<br>"
+                            "Raw count=%{customdata[0]:,.0f}<br>"
+                            "Step conversion=%{customdata[2]:.0%}<extra></extra>"
+                        ),
                     ),
                     row=1,
                     col=col_index,
@@ -358,14 +379,26 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
             (1, first_steps, COLORBLIND_SAFE_CHART_COLORS["accent_red"]),
             (2, second_steps, COLORBLIND_SAFE_CHART_COLORS["accent_gray"]),
         ]:
+            percentages = percent_values(steps)
+            step_rates = step_values(steps)
             figure.add_trace(
                 go.Bar(
-                    x=percent_values(steps),
+                    x=percentages,
                     y=[label for label, _ in steps],
                     orientation="h",
                     marker_color=color,
-                    text=[f"{value:.0%}" for value in percent_values(steps)],
+                    text=[
+                        f"{pct:.0%} ({int(raw):,})" if idx == 0 else f"{pct:.0%} ({step:.0%} step)"
+                        for idx, ((_, raw), pct, step) in enumerate(zip(steps, percentages, step_rates))
+                    ],
                     textposition="outside",
+                    customdata=[[raw, pct, step] for (_, raw), pct, step in zip(steps, percentages, step_rates)],
+                    hovertemplate=(
+                        "%{y}<br>"
+                        "Share of attempts=%{customdata[1]:.0%}<br>"
+                        "Raw count=%{customdata[0]:,.0f}<br>"
+                        "Step conversion=%{customdata[2]:.0%}<extra></extra>"
+                    ),
                     showlegend=False,
                 ),
                 row=1,
@@ -389,6 +422,8 @@ def build_rate_heatmap(
     zmax: float,
     colorscale: list[list[float | str]],
     text_matrix: list[list[str]],
+    hover_matrix: list[list[str]] | None = None,
+    colorbar_title: str | None = None,
 ) -> go.Figure:
     """Render a labeled heatmap."""
     figure = go.Figure(
@@ -401,7 +436,9 @@ def build_rate_heatmap(
             zmax=zmax,
             text=text_matrix,
             texttemplate="%{text}",
-            hovertemplate="%{x}<br>%{y}<br>%{z:.1%}<extra></extra>",
+            customdata=hover_matrix,
+            hovertemplate="%{customdata}<extra></extra>" if hover_matrix else "%{x}<br>%{y}<br>%{z:.1%}<extra></extra>",
+            colorbar={"title": colorbar_title} if colorbar_title else None,
         )
     )
     apply_accessible_figure_style(figure, title=title, height=520)
@@ -455,10 +492,33 @@ def build_rally_profile_chart(chart_df: pd.DataFrame, split_by_result: bool, tit
             .fillna(0)
         )
         total_matches = max(float(match_counts.values.sum()), 1.0)
-        diff = (wins / total_matches) - (losses / total_matches)
+        win_share = wins / total_matches
+        loss_share = losses / total_matches
+        diff = win_share - loss_share
+        max_abs = max(float(abs(diff.values).max()), 0.01)
         text = [
             [
                 f"W={int(wins.iat[i, j])}<br>L={int(losses.iat[i, j])}<br>Total={int(match_counts.iat[i, j])}"
+                for j in range(len(labels))
+            ]
+            for i in range(len(labels))
+        ]
+        hover = [
+            [
+                (
+                    f"Short Rally Share Tier: {labels[j]}<br>"
+                    f"Long Rally Share Tier: {labels[i]}<br>"
+                    f"W matches={int(wins.iat[i, j])} ({float(win_share.iat[i, j]):.0%} of all filtered)<br>"
+                    f"L matches={int(losses.iat[i, j])} ({float(loss_share.iat[i, j]):.0%} of all filtered)<br>"
+                    f"Win rate in profile={(float(wins.iat[i, j]) / float(match_counts.iat[i, j])):.0%}<br>"
+                    f"Total matches in cell={int(match_counts.iat[i, j])}"
+                    if float(match_counts.iat[i, j]) > 0
+                    else (
+                        f"Short Rally Share Tier: {labels[j]}<br>"
+                        f"Long Rally Share Tier: {labels[i]}<br>"
+                        "No matches in this profile"
+                    )
+                )
                 for j in range(len(labels))
             ]
             for i in range(len(labels))
@@ -468,10 +528,12 @@ def build_rally_profile_chart(chart_df: pd.DataFrame, split_by_result: bool, tit
             title,
             "Short Rally Share Tier",
             "Long Rally Share Tier",
-            -1,
-            1,
+            -max_abs,
+            max_abs,
             COLORBLIND_SAFE_DIVERGING_SCALE,
             text,
+            hover,
+            "W share of all filtered matches - L share of all filtered matches",
         )
 
     win_rate = (
@@ -532,10 +594,26 @@ def build_set_share_heatmap(chart_df: pd.DataFrame, split_by_result: bool, title
             .reindex(index=labels, columns=labels)
             .fillna(0)
         )
-        diff = (wins / total_sets) - (losses / total_sets)
+        win_share = wins / total_sets
+        loss_share = losses / total_sets
+        diff = win_share - loss_share
+        max_abs = max(float(abs(diff.values).max()), 0.01)
         text = [
             [
                 f"W={int(wins.iat[i, j])}<br>L={int(losses.iat[i, j])}<br>Total={int(all_sets.iat[i, j])}"
+                for j in range(len(labels))
+            ]
+            for i in range(len(labels))
+        ]
+        hover = [
+            [
+                (
+                    f"{bottom_col.replace(' Tier', '')}: {labels[j]}<br>"
+                    f"{left_col.replace(' Tier', '')}: {labels[i]}<br>"
+                    f"W sets={int(wins.iat[i, j])} ({float(win_share.iat[i, j]):.0%} of all filtered)<br>"
+                    f"L sets={int(losses.iat[i, j])} ({float(loss_share.iat[i, j]):.0%} of all filtered)<br>"
+                    f"Total sets in cell={int(all_sets.iat[i, j])}"
+                )
                 for j in range(len(labels))
             ]
             for i in range(len(labels))
@@ -545,10 +623,12 @@ def build_set_share_heatmap(chart_df: pd.DataFrame, split_by_result: bool, title
             title,
             bottom_col.replace(" Tier", ""),
             left_col.replace(" Tier", ""),
-            -1,
-            1,
+            -max_abs,
+            max_abs,
             COLORBLIND_SAFE_DIVERGING_SCALE,
             text,
+            hover,
+            "W share of all filtered sets - L share of all filtered sets",
         )
 
     share = all_sets / total_sets
@@ -748,11 +828,6 @@ with st.sidebar:
     selected_opp_team = st.selectbox("Opp Team", filter_values["opp_teams"])
     selected_season = st.selectbox("Season", filter_values["seasons"])
     split_charts = st.checkbox("Split Charts W/L", value=False)
-    selected_metric_labels = st.multiselect(
-        "Serve Trend Metrics",
-        [label for label, _, _, _ in SERVE_TREND_METRICS],
-        default=[label for label, _, _, _ in SERVE_TREND_METRICS],
-    )
 
 filtered_df = filter_matches(
     summary_df,
@@ -856,6 +931,19 @@ with tabs[2]:
 
 with tabs[3]:
     st.subheader(f"Serve Stats Trend: {current_scope}")
+    all_serve_trend_metric_labels = [label for label, _, _, _ in SERVE_TREND_METRICS]
+    if "serve_trend_metrics" not in st.session_state:
+        st.session_state["serve_trend_metrics"] = all_serve_trend_metric_labels
+    reset_col, metrics_col = st.columns([1, 5])
+    with reset_col:
+        if st.button("Reset", key="reset_serve_trend_metrics"):
+            st.session_state["serve_trend_metrics"] = all_serve_trend_metric_labels
+    with metrics_col:
+        selected_metric_labels = st.multiselect(
+            "Serve Trend Metrics",
+            all_serve_trend_metric_labels,
+            key="serve_trend_metrics",
+        )
     selected_metrics = [
         metric for metric in SERVE_TREND_METRICS if metric[0] in selected_metric_labels
     ]
