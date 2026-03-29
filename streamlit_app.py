@@ -77,6 +77,17 @@ def scope_text(player: str, year: str, month_name: str, opp_team: str, season: s
     return " | ".join(labels) if labels else "Current Filters"
 
 
+def chart_key(name: str, *parts: object) -> str:
+    """Build a stable chart key that changes when filters or chart options change."""
+    serialized = [name]
+    for part in parts:
+        if isinstance(part, (list, tuple, set)):
+            serialized.append(",".join(str(item) for item in part))
+        else:
+            serialized.append(str(part))
+    return "::".join(serialized)
+
+
 def tier_from_quantiles(series: pd.Series) -> pd.Categorical:
     """Bucket continuous values into low, mid, high tiers."""
     labels = ["Low", "Mid", "High"]
@@ -594,6 +605,15 @@ filtered_df = filter_matches(
     season_label=selected_season,
 )
 current_scope = scope_text(selected_player, selected_year, selected_month, selected_opp_team, selected_season)
+base_chart_key_parts = (
+    selected_player,
+    selected_year,
+    selected_month,
+    selected_opp_team,
+    selected_season,
+    split_charts,
+    len(filtered_df),
+)
 insights = summarize_key_insights(filtered_df)
 
 metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
@@ -640,9 +660,17 @@ with tabs[0]:
     win_loss_fig = build_win_loss_chart(filtered_df, f"Win/Loss Trend ({current_scope})")
     sets_games_fig = build_sets_games_chart(filtered_df, f"Sets & Games by Year ({current_scope})")
     if win_loss_fig:
-        overview_col1.plotly_chart(win_loss_fig, width="stretch")
+        overview_col1.plotly_chart(
+            win_loss_fig,
+            width="stretch",
+            key=chart_key("win_loss", *base_chart_key_parts),
+        )
     if sets_games_fig:
-        overview_col2.plotly_chart(sets_games_fig, width="stretch")
+        overview_col2.plotly_chart(
+            sets_games_fig,
+            width="stretch",
+            key=chart_key("sets_games", *base_chart_key_parts),
+        )
 
     pivot_df = build_pivot_summary(filtered_df)
     st.markdown("**Pivot Summary**")
@@ -680,7 +708,11 @@ with tabs[3]:
         f"Serve Statistics Trend by Match ({current_scope})",
     )
     if serve_trend_fig:
-        st.plotly_chart(serve_trend_fig, width="stretch")
+        st.plotly_chart(
+            serve_trend_fig,
+            width="stretch",
+            key=chart_key("serve_trend", *base_chart_key_parts, selected_metric_labels),
+        )
     else:
         st.info("No serve trend data is available for the current filters.")
 
@@ -688,7 +720,11 @@ with tabs[4]:
     st.subheader(f"Games Diff Control: {current_scope}")
     games_diff_fig = build_games_diff_chart(filtered_df, split_charts, f"Games Diff Control ({current_scope})")
     if games_diff_fig:
-        st.plotly_chart(games_diff_fig, width="stretch")
+        st.plotly_chart(
+            games_diff_fig,
+            width="stretch",
+            key=chart_key("games_diff", *base_chart_key_parts),
+        )
     else:
         st.info("No games-diff data is available for the current filters.")
 
@@ -696,7 +732,11 @@ with tabs[5]:
     st.subheader(f"Serve Efficiency Funnel: {current_scope}")
     funnel_fig = build_funnel_chart(filtered_df, split_charts, f"Serve Efficiency Funnel ({current_scope})")
     if funnel_fig:
-        st.plotly_chart(funnel_fig, width="stretch")
+        st.plotly_chart(
+            funnel_fig,
+            width="stretch",
+            key=chart_key("serve_funnel", *base_chart_key_parts),
+        )
     else:
         st.info("No serve funnel data is available for the current filters.")
 
@@ -704,7 +744,11 @@ with tabs[6]:
     st.subheader(f"Rally Length Wins: {current_scope}")
     rally_profile_fig = build_rally_profile_chart(filtered_df, split_charts, f"Rally Length Wins ({current_scope})")
     if rally_profile_fig:
-        st.plotly_chart(rally_profile_fig, width="stretch")
+        st.plotly_chart(
+            rally_profile_fig,
+            width="stretch",
+            key=chart_key("rally_profile", *base_chart_key_parts),
+        )
     else:
         st.info("No rally profile data is available for the current filters.")
 
@@ -712,7 +756,11 @@ with tabs[7]:
     st.subheader(f"Rally Bins: {current_scope}")
     rally_bins_fig = build_rally_bins_chart(filtered_df, split_charts, f"Rally Bins ({current_scope})")
     if rally_bins_fig:
-        st.plotly_chart(rally_bins_fig, width="stretch")
+        st.plotly_chart(
+            rally_bins_fig,
+            width="stretch",
+            key=chart_key("rally_bins", *base_chart_key_parts),
+        )
     else:
         st.info("No rally-bin data is available for the current filters.")
 
@@ -720,7 +768,11 @@ with tabs[8]:
     st.subheader(f"Pressure Bins: {current_scope}")
     pressure_fig = build_pressure_bins_chart(filtered_df, split_charts, f"Pressure Bins ({current_scope})")
     if pressure_fig:
-        st.plotly_chart(pressure_fig, width="stretch")
+        st.plotly_chart(
+            pressure_fig,
+            width="stretch",
+            key=chart_key("pressure_bins", *base_chart_key_parts),
+        )
     else:
         st.info("No pressure-bin data is available for the current filters.")
 
