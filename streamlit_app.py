@@ -204,7 +204,11 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
-def style_banded_rows(df: pd.DataFrame, hide_index: bool = True) -> pd.io.formats.style.Styler:
+def style_banded_rows(
+    df: pd.DataFrame,
+    hide_index: bool = True,
+    formatters: dict[str, str | callable] | None = None,
+) -> pd.io.formats.style.Styler:
     """Apply alternating row shading to read-only dataframes."""
     band_color = "rgba(204, 0, 0, 0.08)"
     base_color = "rgba(255, 255, 255, 0.9)"
@@ -216,6 +220,8 @@ def style_banded_rows(df: pd.DataFrame, hide_index: bool = True) -> pd.io.format
         ],
         axis=1,
     )
+    if formatters:
+        styler = styler.format(formatters)
     if hide_index:
         styler = styler.hide(axis="index")
     return styler
@@ -1062,7 +1068,15 @@ with tabs[2]:
     )
     if not ace_df.empty:
         display_df = ace_df[["Player"] + selected_columns]
-        st.dataframe(style_banded_rows(display_df), width="stretch")
+        percent_formatters = {
+            column: "{:.1%}"
+            for column in display_df.columns
+            if "%" in column
+        }
+        st.dataframe(
+            style_banded_rows(display_df, formatters=percent_formatters),
+            width="stretch",
+        )
     else:
         st.info("No serve/return match stats available for the current filters.")
 
