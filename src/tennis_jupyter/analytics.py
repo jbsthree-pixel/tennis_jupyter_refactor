@@ -125,7 +125,7 @@ def available_filter_values(df: pd.DataFrame) -> dict[str, list[str]]:
 
 
 def build_pivot_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Build the player and season-level summary table shown in the app."""
+    """Build an Excel-style pivot table with player totals and indented seasons."""
     calc_df = with_season_columns(df)
     if calc_df.empty:
         return pd.DataFrame()
@@ -139,28 +139,50 @@ def build_pivot_summary(df: pd.DataFrame) -> pd.DataFrame:
         "Games Won": ("Games Won", "sum"),
         "Games Lost": ("Games Lost", "sum"),
     }
-
     player_totals = (
         calc_df.groupby("player", dropna=False)
         .agg(**metric_columns)
         .reset_index()
         .sort_values("player")
     )
-    player_totals.insert(1, "Season", "All Seasons")
-    player_totals.insert(0, "Level", "Player Total")
+    player_totals = player_totals.rename(columns={"player": "Row Labels"})
+    player_totals.insert(0, "_Row Sort", 0)
+    player_totals["_Player Sort"] = player_totals["Row Labels"].astype(str)
+    player_totals["_Season Sort"] = -1
 
     season_rows = (
-        calc_df.groupby(["player", "_Season Label", "_Season Sort"], dropna=False)
+        calc_df.groupby(["player", "_Season Label"], dropna=False)
         .agg(**metric_columns)
         .reset_index()
-        .sort_values(["player", "_Season Sort", "_Season Label"], na_position="last")
-        .rename(columns={"_Season Label": "Season"})
+        .merge(
+            calc_df[["player", "_Season Label", "_Season Sort"]].drop_duplicates(),
+            on=["player", "_Season Label"],
+            how="left",
+        )
     )
-    season_rows.insert(0, "Level", "Season")
-    season_rows = season_rows.drop(columns=["_Season Sort"])
+    season_rows["Row Labels"] = "\u00A0\u00A0\u00A0\u00A0" + season_rows["_Season Label"].astype(str)
+    season_rows.insert(0, "_Row Sort", 1)
+    season_rows["_Player Sort"] = season_rows["player"].astype(str)
 
-    combined = pd.concat([player_totals, season_rows], ignore_index=True, sort=False)
-    return combined.reset_index(drop=True)
+    combined = pd.concat(
+        [
+            player_totals,
+            season_rows[
+                ["_Row Sort", "_Player Sort", "_Season Sort", "Row Labels", *metric_columns]
+            ],
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    combined = combined.sort_values(
+        ["_Player Sort", "_Row Sort", "_Season Sort", "Row Labels"],
+        na_position="last",
+    ).reset_index(drop=True)
+    combined = combined.drop(columns=["_Row Sort", "_Player Sort", "_Season Sort"])
+
+    numeric_columns = combined.select_dtypes(include="number").columns
+    combined[numeric_columns] = combined[numeric_columns].fillna(0).astype(int)
+    return combined
 
 
 def build_serve_return_match_stats(df: pd.DataFrame) -> pd.DataFrame:
