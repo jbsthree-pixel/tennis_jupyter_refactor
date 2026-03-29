@@ -63,11 +63,8 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     """Serialize the report workbook to in-memory Excel bytes."""
     buffer = io.BytesIO()
-    temp_path = PROJECT_ROOT / "output" / "_streamlit_temp_report.xlsx"
-    write_excel_report(df, temp_path)
-    data = temp_path.read_bytes()
-    temp_path.unlink(missing_ok=True)
-    buffer.write(data)
+    write_excel_report(df, buffer)
+    buffer.seek(0)
     return buffer.getvalue()
 
 
@@ -611,14 +608,14 @@ download_col1.download_button(
     data=to_csv_bytes(filtered_df),
     file_name="Tennis_MatchSummary.csv",
     mime="text/csv",
-    use_container_width=True,
+    width="stretch",
 )
 download_col2.download_button(
     "Download Filtered Excel Report",
     data=to_excel_bytes(filtered_df),
     file_name="Tennis_MatchSummary_Report.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
+    width="stretch",
 )
 
 tabs = st.tabs(
@@ -643,17 +640,17 @@ with tabs[0]:
     win_loss_fig = build_win_loss_chart(filtered_df, f"Win/Loss Trend ({current_scope})")
     sets_games_fig = build_sets_games_chart(filtered_df, f"Sets & Games by Year ({current_scope})")
     if win_loss_fig:
-        overview_col1.plotly_chart(win_loss_fig, use_container_width=True)
+        overview_col1.plotly_chart(win_loss_fig, width="stretch")
     if sets_games_fig:
-        overview_col2.plotly_chart(sets_games_fig, use_container_width=True)
+        overview_col2.plotly_chart(sets_games_fig, width="stretch")
 
     pivot_df = build_pivot_summary(filtered_df)
     st.markdown("**Pivot Summary**")
-    st.dataframe(pivot_df, use_container_width=True, hide_index=True)
+    st.dataframe(pivot_df, width="stretch", hide_index=True)
 
 with tabs[1]:
     st.subheader(f"Raw Matches: {current_scope}")
-    st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+    st.dataframe(filtered_df, width="stretch", hide_index=True)
 
 with tabs[2]:
     st.subheader(f"Serve / Return Match Stats: {current_scope}")
@@ -667,7 +664,7 @@ with tabs[2]:
     )
     if not ace_df.empty:
         display_df = ace_df[["Player"] + selected_columns]
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, width="stretch", hide_index=True)
     else:
         st.info("No serve/return match stats available for the current filters.")
 
@@ -683,7 +680,7 @@ with tabs[3]:
         f"Serve Statistics Trend by Match ({current_scope})",
     )
     if serve_trend_fig:
-        st.plotly_chart(serve_trend_fig, use_container_width=True)
+        st.plotly_chart(serve_trend_fig, width="stretch")
     else:
         st.info("No serve trend data is available for the current filters.")
 
@@ -691,7 +688,7 @@ with tabs[4]:
     st.subheader(f"Games Diff Control: {current_scope}")
     games_diff_fig = build_games_diff_chart(filtered_df, split_charts, f"Games Diff Control ({current_scope})")
     if games_diff_fig:
-        st.plotly_chart(games_diff_fig, use_container_width=True)
+        st.plotly_chart(games_diff_fig, width="stretch")
     else:
         st.info("No games-diff data is available for the current filters.")
 
@@ -699,7 +696,7 @@ with tabs[5]:
     st.subheader(f"Serve Efficiency Funnel: {current_scope}")
     funnel_fig = build_funnel_chart(filtered_df, split_charts, f"Serve Efficiency Funnel ({current_scope})")
     if funnel_fig:
-        st.plotly_chart(funnel_fig, use_container_width=True)
+        st.plotly_chart(funnel_fig, width="stretch")
     else:
         st.info("No serve funnel data is available for the current filters.")
 
@@ -707,7 +704,7 @@ with tabs[6]:
     st.subheader(f"Rally Length Wins: {current_scope}")
     rally_profile_fig = build_rally_profile_chart(filtered_df, split_charts, f"Rally Length Wins ({current_scope})")
     if rally_profile_fig:
-        st.plotly_chart(rally_profile_fig, use_container_width=True)
+        st.plotly_chart(rally_profile_fig, width="stretch")
     else:
         st.info("No rally profile data is available for the current filters.")
 
@@ -715,7 +712,7 @@ with tabs[7]:
     st.subheader(f"Rally Bins: {current_scope}")
     rally_bins_fig = build_rally_bins_chart(filtered_df, split_charts, f"Rally Bins ({current_scope})")
     if rally_bins_fig:
-        st.plotly_chart(rally_bins_fig, use_container_width=True)
+        st.plotly_chart(rally_bins_fig, width="stretch")
     else:
         st.info("No rally-bin data is available for the current filters.")
 
@@ -723,7 +720,7 @@ with tabs[8]:
     st.subheader(f"Pressure Bins: {current_scope}")
     pressure_fig = build_pressure_bins_chart(filtered_df, split_charts, f"Pressure Bins ({current_scope})")
     if pressure_fig:
-        st.plotly_chart(pressure_fig, use_container_width=True)
+        st.plotly_chart(pressure_fig, width="stretch")
     else:
         st.info("No pressure-bin data is available for the current filters.")
 
@@ -732,7 +729,7 @@ with tabs[9]:
     review_df, review_index_map, source_raw_df = load_source_review_cached(str(source_path), csv_mtime)
     edited_df = st.data_editor(
         review_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         num_rows="fixed",
         column_config={
@@ -756,4 +753,4 @@ with tabs[9]:
 with tabs[10]:
     st.subheader("Raw Data Dictionary")
     dictionary_df = build_raw_data_dictionary(filtered_df if not filtered_df.empty else summary_df)
-    st.dataframe(dictionary_df, use_container_width=True, hide_index=True)
+    st.dataframe(dictionary_df, width="stretch", hide_index=True)

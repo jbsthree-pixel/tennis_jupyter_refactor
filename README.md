@@ -67,6 +67,26 @@ What you get in the browser:
 - filtered CSV and Excel downloads
 - source row editing and save-back to the local CSV
 
+## Deploy With Streamlit Community Cloud
+
+This repository is set up so `streamlit_app.py` can be used as the app entrypoint.
+
+1. Push this folder to a GitHub repository.
+2. In Streamlit Community Cloud, create a new app from that repository.
+3. Set the main file path to `streamlit_app.py`.
+4. Leave the Python dependencies pointed at `requirements.txt`.
+5. Deploy.
+
+The default dataset is already referenced from:
+
+`data/input/StatsReport_TeamNames.csv`
+
+Important hosted-app note:
+
+- downloads work normally on Streamlit Community Cloud
+- the `Source Row Edits` tab writes changes back to the local CSV file on disk
+- on hosted Streamlit environments, filesystem writes are not durable application storage, so those edits should be treated as temporary unless you add persistent storage or a sync workflow
+
 ## Run From The Command Line
 
 This project supports a normal Python run from the repository root:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from os import PathLike
 from pathlib import Path
+from typing import BinaryIO
 
 import pandas as pd
 from openpyxl.chart import BarChart, LineChart, Reference
@@ -232,9 +234,11 @@ def add_report_charts(workbook) -> None:
             charts_ws.add_chart(chart, "P22")
 
 
-def write_excel_report(grouped: pd.DataFrame, out_path: Path) -> None:
+def write_excel_report(grouped: pd.DataFrame, out_path: str | PathLike[str] | BinaryIO) -> None:
     """Write the summary dataset and pivot tables to Excel."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(out_path, (str, PathLike)):
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
     tables = build_excel_report_tables(grouped)
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
