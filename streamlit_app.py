@@ -204,6 +204,23 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def style_banded_rows(df: pd.DataFrame, hide_index: bool = True) -> pd.io.formats.style.Styler:
+    """Apply alternating row shading to read-only dataframes."""
+    band_color = "rgba(204, 0, 0, 0.08)"
+    base_color = "rgba(255, 255, 255, 0.9)"
+
+    styler = df.style.apply(
+        lambda row: [
+            f"background-color: {band_color if row.name % 2 else base_color}"
+            for _ in row
+        ],
+        axis=1,
+    )
+    if hide_index:
+        styler = styler.hide(axis="index")
+    return styler
+
+
 def image_to_data_uri(path: Path) -> str | None:
     """Convert a local image file into an embeddable data URI."""
     if not path.exists():
@@ -1027,11 +1044,11 @@ with tabs[0]:
 
     pivot_df = build_pivot_summary(filtered_df)
     st.markdown("**Pivot Summary**")
-    st.dataframe(pivot_df, width="stretch", hide_index=True)
+    st.dataframe(style_banded_rows(pivot_df), width="stretch")
 
 with tabs[1]:
     st.subheader(f"Raw Matches: {current_scope}")
-    st.dataframe(filtered_df, width="stretch", hide_index=True)
+    st.dataframe(style_banded_rows(filtered_df), width="stretch")
 
 with tabs[2]:
     st.subheader(f"Serve / Return Match Stats: {current_scope}")
@@ -1045,7 +1062,7 @@ with tabs[2]:
     )
     if not ace_df.empty:
         display_df = ace_df[["Player"] + selected_columns]
-        st.dataframe(display_df, width="stretch", hide_index=True)
+        st.dataframe(style_banded_rows(display_df), width="stretch")
     else:
         st.info("No serve/return match stats available for the current filters.")
 
@@ -1171,4 +1188,4 @@ with tabs[9]:
 with tabs[10]:
     st.subheader("Raw Data Dictionary")
     dictionary_df = build_raw_data_dictionary(filtered_df if not filtered_df.empty else summary_df)
-    st.dataframe(dictionary_df, width="stretch", hide_index=True)
+    st.dataframe(style_banded_rows(dictionary_df), width="stretch")

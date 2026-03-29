@@ -9,6 +9,8 @@ from typing import BinaryIO
 import pandas as pd
 from openpyxl.chart import BarChart, LineChart, Reference
 from openpyxl.styles import Font
+from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.utils import get_column_letter
 
 from .shared import safe_ratio
 
@@ -167,6 +169,23 @@ def _autosize_and_format_sheet(ws) -> None:
             ws.cell(row=row_index, column=column_index).number_format = "0.0%"
 
 
+def _add_banded_table(ws, table_name: str) -> None:
+    """Convert a worksheet range into an Excel table with banded rows."""
+    if ws.max_row < 1 or ws.max_column < 1:
+        return
+
+    last_column = get_column_letter(ws.max_column)
+    table = Table(displayName=table_name, ref=f"A1:{last_column}{ws.max_row}")
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    ws.add_table(table)
+
+
 def _add_chart_title(chart, title: str) -> None:
     """Apply consistent chart sizing and title formatting."""
     chart.title = title
@@ -247,6 +266,8 @@ def write_excel_report(grouped: pd.DataFrame, out_path: str | PathLike[str] | Bi
 
         workbook = writer.book
         for worksheet in workbook.worksheets:
+            if worksheet.title != "Charts":
+                _add_banded_table(worksheet, f"Tbl_{worksheet.title}")
             _autosize_and_format_sheet(worksheet)
         add_report_charts(workbook)
         _autosize_and_format_sheet(workbook["Charts"])
