@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import sys
 from pathlib import Path
@@ -55,6 +56,94 @@ st.markdown(
         .stApp {{
             background: linear-gradient(180deg, #fffdf8 0%, var(--surface-neutral) 100%);
             color: var(--text-strong);
+        }}
+
+        .nc-state-banner {{
+            align-items: center;
+            background: linear-gradient(135deg, #cc0000 0%, #990000 55%, #1f1f1f 100%);
+            border: 1px solid rgba(31, 31, 31, 0.15);
+            border-radius: 18px;
+            color: #ffffff;
+            display: flex;
+            gap: 1rem;
+            margin: 0 0 1.25rem 0;
+            overflow: hidden;
+            padding: 1.1rem 1.4rem;
+            position: relative;
+        }}
+
+        .nc-state-banner::after {{
+            background: linear-gradient(90deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0));
+            content: "";
+            inset: 0;
+            pointer-events: none;
+            position: absolute;
+        }}
+
+        .nc-state-banner__eyebrow {{
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            margin-bottom: 0.35rem;
+            position: relative;
+            text-transform: uppercase;
+            z-index: 1;
+        }}
+
+        .nc-state-banner__title {{
+            font-size: 2rem;
+            font-weight: 800;
+            line-height: 1.05;
+            margin: 0;
+            position: relative;
+            z-index: 1;
+        }}
+
+        .nc-state-banner__subtitle {{
+            font-size: 1rem;
+            margin-top: 0.45rem;
+            max-width: 52rem;
+            opacity: 0.95;
+            position: relative;
+            z-index: 1;
+        }}
+
+        .nc-state-banner__logo {{
+            background: rgba(255, 255, 255, 0.92);
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+            flex: 0 0 auto;
+            padding: 0.45rem;
+            position: relative;
+            width: 92px;
+            z-index: 1;
+        }}
+
+        .nc-state-banner__logo img {{
+            display: block;
+            height: auto;
+            width: 100%;
+        }}
+
+        .nc-state-banner__content {{
+            min-width: 0;
+            position: relative;
+            z-index: 1;
+        }}
+
+        @media (max-width: 640px) {{
+            .nc-state-banner {{
+                align-items: flex-start;
+                flex-direction: column;
+            }}
+
+            .nc-state-banner__logo {{
+                width: 72px;
+            }}
+
+            .nc-state-banner__title {{
+                font-size: 1.65rem;
+            }}
         }}
 
         .stButton > button,
@@ -113,6 +202,15 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     write_excel_report(df, buffer)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def image_to_data_uri(path: Path) -> str | None:
+    """Convert a local image file into an embeddable data URI."""
+    if not path.exists():
+        return None
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    image_type = path.suffix.lower().lstrip(".") or "png"
+    return f"data:image/{image_type};base64,{encoded}"
 
 
 def scope_text(player: str, year: str, month_name: str, opp_team: str, season: str) -> str:
@@ -797,7 +895,29 @@ def build_sets_games_chart(chart_df: pd.DataFrame, title: str) -> go.Figure | No
     return figure
 
 
-st.title("Tennis Match Summary")
+banner_logo_path = PROJECT_ROOT / "assets" / "ncstate-circle-blk-kowolf.png"
+banner_logo_uri = image_to_data_uri(banner_logo_path)
+banner_logo_html = (
+    f'<div class="nc-state-banner__logo"><img src="{banner_logo_uri}" alt="NC State logo" /></div>'
+    if banner_logo_uri
+    else ""
+)
+
+st.markdown(
+    f"""
+    <section class="nc-state-banner">
+        {banner_logo_html}
+        <div class="nc-state-banner__content">
+            <div class="nc-state-banner__eyebrow">NC State Women's Tennis</div>
+            <h1 class="nc-state-banner__title">Tennis Match Summary</h1>
+            <div class="nc-state-banner__subtitle">
+                Match analytics and reporting for local review, seasonal trends, and opponent scouting.
+            </div>
+        </div>
+    </section>
+    """,
+    unsafe_allow_html=True,
+)
 st.caption("Cross-platform local browser app for Windows and macOS.")
 
 default_csv = PROJECT_ROOT / "data" / "input" / "StatsReport_TeamNames.csv"
