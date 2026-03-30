@@ -40,6 +40,71 @@ from tennis_jupyter.reporting import write_excel_report  # noqa: E402
 from tennis_jupyter.shared import safe_ratio  # noqa: E402
 
 
+BENCHMARK_LEVEL_COLUMNS = {
+    "Tour Avg": "Tour Avg",
+    "Top 10 Avg": "Top 10 Avg",
+}
+
+BENCHMARK_SPECS = [
+    {
+        "workbook_metric": "1st Serve In",
+        "app_label": "1st Serve In %",
+        "table_column": "First Serve %",
+        "numerator": "first_serve_in",
+        "denominator": "first_serve_attempt",
+    },
+    {
+        "workbook_metric": "1st Serve Points Won",
+        "app_label": "1st Serve Won %",
+        "table_column": "1st Serve Win %",
+        "numerator": "first_serve_won",
+        "denominator": "first_serve_in",
+    },
+    {
+        "workbook_metric": "2nd Serve Points Won",
+        "app_label": "2nd Serve Won %",
+        "table_column": "2nd Serve Win %",
+        "numerator": "second_serve_won",
+        "denominator": "second_serve_attempt",
+    },
+    {
+        "workbook_metric": "1st Serves Unreturned",
+        "app_label": None,
+        "table_column": "1SNR %",
+        "numerator": "first_serve_not_returned",
+        "denominator": "first_serve_in",
+    },
+    {
+        "workbook_metric": "1st Serve Return Points Won",
+        "app_label": None,
+        "table_column": "First Serve Returns Won %",
+        "numerator": "first_serve_return_won",
+        "denominator": "first_serve_return_opportunity",
+    },
+    {
+        "workbook_metric": "2nd Serve Return Points Won",
+        "app_label": None,
+        "table_column": "Second Serve Returns Won %",
+        "numerator": "second_serve_return_won",
+        "denominator": "second_serve_return_opportunity",
+    },
+    {
+        "workbook_metric": "Break Points Won",
+        "app_label": None,
+        "table_column": None,
+        "numerator": "break_point_won",
+        "denominator": "break_point_total",
+    },
+    {
+        "workbook_metric": "Break Points Saved",
+        "app_label": None,
+        "table_column": None,
+        "numerator": "break_point_saved",
+        "denominator": "break_point_faced",
+    },
+]
+
+
 st.set_page_config(page_title="Tennis Match Summary", layout="wide")
 
 st.markdown(
@@ -191,6 +256,17 @@ def load_source_review_cached(source_csv: str, csv_mtime: float):
     return load_source_review(source_csv)
 
 
+@st.cache_data(show_spinner=False)
+def load_benchmark_workbook(benchmark_xlsx: str, benchmark_mtime: float) -> pd.DataFrame:
+    """Load the tour benchmark workbook into a normalized dataframe."""
+    _ = benchmark_mtime
+    benchmark_df = pd.read_excel(benchmark_xlsx)
+    benchmark_df = benchmark_df.rename(columns={benchmark_df.columns[0]: "Metric"})
+    benchmark_df["Metric"] = benchmark_df["Metric"].fillna("").astype(str).str.strip()
+    benchmark_df = benchmark_df[benchmark_df["Metric"] != ""].copy()
+    return benchmark_df
+
+
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     """Serialize a dataframe to UTF-8 CSV bytes."""
     return df.to_csv(index=False).encode("utf-8")
@@ -256,6 +332,170 @@ def chart_key(name: str, *parts: object) -> str:
     return "::".join(serialized)
 
 
+def benchmark_lookup(benchmark_df: pd.DataFrame) -> dict[str, dict[str, float]]:
+    """Index workbook metrics by label for quick baseline lookup."""
+    lookup: dict[str, dict[str, float]] = {}
+    if benchmark_df.empty:
+        return lookup
+
+    for _, row in benchmark_df.iterrows():
+        metric_name = str(row.get("Metric", "")).strip()
+        if not metric_name:
+            continue
+        lookup[metric_name] = {
+            level_name: float(row[column])
+            for level_name, column in BENCHMARK_LEVEL_COLUMNS.items()
+            if column in benchmark_df.columns and pd.notna(row.get(column))
+        }
+    return lookup
+
+
+def aggregate_benchmark_metrics(chart_df: pd.DataFrame) -> dict[str, float]:
+    """Aggregate filtered match data into workbook-comparable rates."""
+    values: dict[str, float] = {}
+    if chart_df.empty:
+        return values
+
+    totals = chart_df.copy()
+    for spec in BENCHMARK_SPECS:
+        if spec["numerator"] not in totals.columns or spec["denominator"] not in totals.columns:
+            continue
+        numerator = pd.to_numeric(totals[spec["numerator"]], errors="coerce").fillna(0).sum()
+        denominator = pd.to_numeric(totals[spec["denominator"]], errors="coerce").fillna(0).sum()
+        values[spec["workbook_metric"]] = float(numerator / denominator) if denominator else 0.0
+
+    return values
+
+
+def build_benchmark_snapshot(
+    chart_df: pd.DataFrame,
+    benchmark_df: pd.DataFrame,
+    selected_levels: list[str],
+) -> pd.DataFrame:
+    """Compare the filtered aggregate rates against selected benchmark baselines."""
+    if chart_df.empty or benchmark_df.empty or not selected_levels:
+        return pd.DataFrame()
+
+    lookup = benchmark_lookup(benchmark_df)
+    current_values = aggregate_benchmark_metrics(chart_df)
+    rows: list[dict[str, object]] = []
+    for spec in BENCHMARK_SPECS:
+        metric_name = spec["workbook_metric"]
+        if metric_name not in lookup or metric_name not in current_values:
+            continue
+
+        row: dict[str, object] = {
+            "Metric": metric_name,
+            "Current": current_values[metric_name],
+        }
+        for level in selected_levels:
+            if level not in lookup[metric_name]:
+                continue
+            row[level] = lookup[metric_name][level]
+            row[f"vs {level}"] = current_values[metric_name] - lookup[metric_name][level]
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def add_benchmark_lines(
+    figure: go.Figure,
+    selected_metrics: list[tuple[str, str, str, str]],
+    benchmark_df: pd.DataFrame,
+    selected_levels: list[str],
+) -> None:
+    """Overlay workbook benchmark lines for selected serve trend metrics."""
+    if benchmark_df.empty or not selected_levels:
+        return
+
+    lookup = benchmark_lookup(benchmark_df)
+    metric_to_workbook = {
+        spec["app_label"]: spec["workbook_metric"]
+        for spec in BENCHMARK_SPECS
+        if spec["app_label"]
+    }
+    line_styles = {
+        "Tour Avg": {"dash": "dot", "color": COLORBLIND_SAFE_CHART_COLORS["accent_black"]},
+        "Top 10 Avg": {"dash": "dash", "color": COLORBLIND_SAFE_CHART_COLORS["accent_taupe"]},
+    }
+
+    for metric_label, _, _, _ in selected_metrics:
+        workbook_metric = metric_to_workbook.get(metric_label)
+        if not workbook_metric or workbook_metric not in lookup:
+            continue
+        for level in selected_levels:
+            baseline_value = lookup[workbook_metric].get(level)
+            if baseline_value is None:
+                continue
+            figure.add_hline(
+                y=baseline_value,
+                line_dash=line_styles[level]["dash"],
+                line_color=line_styles[level]["color"],
+                opacity=0.9,
+                annotation_text=f"{metric_label} {level}: {baseline_value:.1%}",
+                annotation_position="top left",
+            )
+
+
+def benchmark_tier(value: float | None) -> str | None:
+    """Map a rate onto the pressure heatmap tiers."""
+    if value is None or pd.isna(value):
+        return None
+    if value <= 0.35:
+        return "Low"
+    if value <= 0.55:
+        return "Mid"
+    return "High"
+
+
+def add_pressure_benchmark_markers(
+    figure: go.Figure | None,
+    benchmark_df: pd.DataFrame,
+    selected_levels: list[str],
+) -> go.Figure | None:
+    """Mark the benchmark pressure tiers directly on the heatmap."""
+    if figure is None or benchmark_df.empty or not selected_levels:
+        return figure
+
+    lookup = benchmark_lookup(benchmark_df)
+    bp_won = lookup.get("Break Points Won", {})
+    bp_saved = lookup.get("Break Points Saved", {})
+    marker_symbols = {"Tour Avg": "circle-open", "Top 10 Avg": "diamond-open"}
+    marker_colors = {
+        "Tour Avg": COLORBLIND_SAFE_CHART_COLORS["accent_black"],
+        "Top 10 Avg": COLORBLIND_SAFE_CHART_COLORS["accent_taupe"],
+    }
+
+    for level in selected_levels:
+        x_tier = benchmark_tier(bp_won.get(level))
+        y_tier = benchmark_tier(bp_saved.get(level))
+        if not x_tier or not y_tier:
+            continue
+        figure.add_trace(
+            go.Scatter(
+                x=[x_tier],
+                y=[y_tier],
+                mode="markers+text",
+                name=f"{level} Baseline",
+                text=[level],
+                textposition="top center",
+                marker={
+                    "symbol": marker_symbols[level],
+                    "size": 18,
+                    "color": marker_colors[level],
+                    "line": {"width": 2, "color": marker_colors[level]},
+                },
+                hovertemplate=(
+                    f"{level}<br>"
+                    f"Break Points Won={bp_won[level]:.1%}<br>"
+                    f"Break Points Saved={bp_saved[level]:.1%}<extra></extra>"
+                ),
+            )
+        )
+
+    return figure
+
+
 def tier_from_quantiles(series: pd.Series) -> pd.Categorical:
     """Bucket continuous values into low, mid, high tiers."""
     labels = ["Low", "Mid", "High"]
@@ -278,7 +518,7 @@ def fixed_tier(series: pd.Series) -> pd.Categorical:
 
 
 def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[str, str, str, str]], split_by_result: bool, title: str) -> go.Figure | None:
-    """Render an interactive serve trend chart by match sequence."""
+    """Render an interactive serve trend chart by match order with date context."""
     if chart_df.empty or not selected_metrics:
         return None
 
@@ -288,10 +528,67 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
         return None
 
     plot_df = chart_df.copy()
+    if "Match Date" in plot_df.columns:
+        plot_df["Match Date"] = pd.to_datetime(plot_df["Match Date"], errors="coerce")
     sort_columns = [column for column in ["Match Date", "matchId"] if column in plot_df.columns]
     if sort_columns:
         plot_df = plot_df.sort_values(sort_columns, na_position="last")
+    plot_df = plot_df.reset_index(drop=True)
     plot_df["Match Sequence"] = range(1, len(plot_df) + 1)
+    use_match_date = "Match Date" in plot_df.columns and plot_df["Match Date"].notna().any()
+
+    def build_customdata(frame: pd.DataFrame) -> list[list[str]]:
+        date_text = (
+            frame["Match Date"].dt.strftime("%Y-%m-%d").fillna("Unknown")
+            if "Match Date" in frame.columns
+            else pd.Series(["Unknown"] * len(frame), index=frame.index)
+        )
+        opponent_text = (
+            frame["opp"].fillna("").astype(str)
+            if "opp" in frame.columns
+            else pd.Series([""] * len(frame), index=frame.index)
+        )
+        result_text = (
+            frame["Match Result"].fillna("").astype(str)
+            if "Match Result" in frame.columns
+            else pd.Series([""] * len(frame), index=frame.index)
+        )
+        return [
+            [date_text.loc[idx], opponent_text.loc[idx], result_text.loc[idx]]
+            for idx in frame.index
+        ]
+
+    hover_template = (
+        "Match Order: %{x}<br>"
+        "Rate: %{y:.1%}<br>"
+        "Match Date: %{customdata[0]}"
+        "<br>Opponent: %{customdata[1]}"
+        "<br>Result: %{customdata[2]}"
+        "<extra>%{fullData.name}</extra>"
+    )
+    marker_symbols = {
+        "1st Serve In %": "circle",
+        "1st Serve Won %": "square",
+        "2nd Serve In %": "diamond",
+        "2nd Serve Won %": "triangle-up",
+        "Double Fault %": "x",
+    }
+
+    top_tickvals: list[int] = []
+    top_ticktext: list[str] = []
+    if use_match_date:
+        max_ticks = min(6, len(plot_df))
+        step = max(1, (len(plot_df) + max_ticks - 1) // max_ticks)
+        tick_rows = plot_df.iloc[::step].copy()
+        if tick_rows.empty or tick_rows.iloc[-1]["Match Sequence"] != plot_df.iloc[-1]["Match Sequence"]:
+            tick_rows = pd.concat([tick_rows, plot_df.tail(1)], ignore_index=True)
+        tick_rows = tick_rows.drop_duplicates(subset=["Match Sequence"])
+        tick_rows = tick_rows[tick_rows["Match Date"].notna()]
+        top_tickvals = tick_rows["Match Sequence"].astype(int).tolist()
+        top_ticktext = [
+            f"{match_date.strftime('%b')} {match_date.day}"
+            for match_date in tick_rows["Match Date"]
+        ]
 
     figure = go.Figure()
     if split_by_result and "Match Result" in plot_df.columns:
@@ -299,7 +596,6 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
             subset = plot_df[plot_df["Match Result"] == result_label].copy()
             if subset.empty:
                 continue
-            subset["Match Sequence"] = range(1, len(subset) + 1)
             for label, numer, denom, color in selected_metrics:
                 values = safe_ratio(subset[numer], subset[denom]).tolist()
                 figure.add_trace(
@@ -309,6 +605,9 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
                         mode="lines+markers",
                         name=f"{result_label} - {label}",
                         line={"color": color, "dash": dash},
+                        marker={"symbol": marker_symbols.get(label, "circle"), "size": 9},
+                        customdata=build_customdata(subset),
+                        hovertemplate=hover_template,
                     )
                 )
     else:
@@ -321,11 +620,30 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
                     mode="lines+markers",
                     name=label,
                     line={"color": color},
+                    marker={"symbol": marker_symbols.get(label, "circle"), "size": 9},
+                    customdata=build_customdata(plot_df),
+                    hovertemplate=hover_template,
                 )
             )
 
     apply_accessible_figure_style(figure, title=title, height=500)
-    figure.update_xaxes(title_text="Match Sequence")
+    figure.update_xaxes(
+        title_text="Match Order (chronological)",
+        tickmode="linear",
+        dtick=1 if len(plot_df) <= 15 else max(1, len(plot_df) // 8),
+    )
+    if top_tickvals and top_ticktext:
+        figure.update_layout(
+            xaxis2={
+                "overlaying": "x",
+                "side": "top",
+                "tickmode": "array",
+                "tickvals": top_tickvals,
+                "ticktext": top_ticktext,
+                "title": {"text": "Match Date"},
+                "showgrid": False,
+            }
+        )
     figure.update_yaxes(title_text="Rate", tickformat=".0%", range=[0, 1])
     return figure
 
@@ -944,15 +1262,21 @@ st.markdown(
 st.caption("Cross-platform local browser app for Windows and macOS.")
 
 default_csv = PROJECT_ROOT / "data" / "input" / "StatsReport_TeamNames.csv"
+default_benchmark_xlsx = PROJECT_ROOT / "data" / "input" / "Tour Data 2025.xlsx"
 with st.sidebar:
     st.header("Data")
     input_csv = st.text_input("Source CSV", value=str(default_csv))
     name_map = st.text_input("Name Map XLSX (optional)", value="")
+    benchmark_xlsx = st.text_input(
+        "Tour Benchmark XLSX (optional)",
+        value=str(default_benchmark_xlsx) if default_benchmark_xlsx.exists() else "",
+    )
     if st.button("Reload Data"):
         st.cache_data.clear()
 
 source_path = Path(input_csv)
 name_map_path = Path(name_map) if name_map.strip() else None
+benchmark_path = Path(benchmark_xlsx) if benchmark_xlsx.strip() else None
 
 if not source_path.exists():
     st.error(f"Missing source CSV: {source_path}")
@@ -961,6 +1285,12 @@ if not source_path.exists():
 csv_mtime = source_path.stat().st_mtime
 name_map_mtime = name_map_path.stat().st_mtime if name_map_path and name_map_path.exists() else None
 summary_df = load_summary_cached(str(source_path), str(name_map_path) if name_map_path else None, csv_mtime, name_map_mtime)
+benchmark_df = pd.DataFrame()
+if benchmark_path and benchmark_path.exists():
+    benchmark_mtime = benchmark_path.stat().st_mtime
+    benchmark_df = load_benchmark_workbook(str(benchmark_path), benchmark_mtime)
+elif benchmark_path:
+    st.warning(f"Tour benchmark workbook not found: {benchmark_path}")
 
 filter_values = available_filter_values(summary_df)
 with st.sidebar:
@@ -971,6 +1301,18 @@ with st.sidebar:
     selected_opp_team = st.selectbox("Opp Team", filter_values["opp_teams"])
     selected_season = st.selectbox("Season", filter_values["seasons"])
     split_charts = st.checkbox("Split Charts W/L", value=False)
+    st.header("Baselines")
+    available_baseline_levels = [
+        level
+        for level, column in BENCHMARK_LEVEL_COLUMNS.items()
+        if not benchmark_df.empty and column in benchmark_df.columns
+    ]
+    selected_baseline_levels = st.multiselect(
+        "Benchmark Lines",
+        available_baseline_levels,
+        default=["Tour Avg"] if "Tour Avg" in available_baseline_levels else [],
+        help="Overlay tour reference levels from the benchmark workbook on supported charts.",
+    )
 
 filtered_df = filter_matches(
     summary_df,
@@ -988,6 +1330,7 @@ base_chart_key_parts = (
     selected_opp_team,
     selected_season,
     split_charts,
+    tuple(selected_baseline_levels),
     len(filtered_df),
 )
 insights = summarize_key_insights(filtered_df)
@@ -1077,6 +1420,22 @@ with tabs[2]:
             style_banded_rows(display_df, formatters=percent_formatters),
             width="stretch",
         )
+        benchmark_snapshot_df = build_benchmark_snapshot(
+            filtered_df,
+            benchmark_df,
+            selected_baseline_levels,
+        )
+        if not benchmark_snapshot_df.empty:
+            benchmark_formatters = {
+                column: "{:.1%}"
+                for column in benchmark_snapshot_df.columns
+                if column != "Metric"
+            }
+            st.caption("Filtered aggregate compared with selected tour baselines.")
+            st.dataframe(
+                style_banded_rows(benchmark_snapshot_df, formatters=benchmark_formatters),
+                width="stretch",
+            )
     else:
         st.info("No serve/return match stats available for the current filters.")
 
@@ -1085,8 +1444,9 @@ with tabs[3]:
     all_serve_trend_metric_labels = [label for label, _, _, _ in SERVE_TREND_METRICS]
     if "serve_trend_metrics" not in st.session_state:
         st.session_state["serve_trend_metrics"] = all_serve_trend_metric_labels
-    reset_col, metrics_col = st.columns([1, 5])
+    reset_col, metrics_col = st.columns([0.7, 8], gap="small")
     with reset_col:
+        st.markdown("<div style='height: 1.9rem;'></div>", unsafe_allow_html=True)
         if st.button("Reset", key="reset_serve_trend_metrics"):
             st.session_state["serve_trend_metrics"] = all_serve_trend_metric_labels
     with metrics_col:
@@ -1098,20 +1458,70 @@ with tabs[3]:
     selected_metrics = [
         metric for metric in SERVE_TREND_METRICS if metric[0] in selected_metric_labels
     ]
-    serve_trend_fig = plot_metric_line_chart(
-        filtered_df,
-        selected_metrics,
-        split_charts,
-        f"Serve Statistics Trend by Match ({current_scope})",
-    )
-    if serve_trend_fig:
-        st.plotly_chart(
-            serve_trend_fig,
-            width="stretch",
-            key=chart_key("serve_trend", *base_chart_key_parts, selected_metric_labels),
+    if selected_season == "All":
+        season_chart_df = with_season_columns(filtered_df)
+        available_seasons = (
+            season_chart_df[["_Season Sort", "_Season Label"]]
+            .drop_duplicates()
+            .sort_values(["_Season Sort", "_Season Label"], na_position="last")
         )
+        rendered_chart = False
+        for _, season_row in available_seasons.iterrows():
+            season_label = str(season_row["_Season Label"])
+            season_subset = season_chart_df[season_chart_df["_Season Label"] == season_label].copy()
+            serve_trend_fig = plot_metric_line_chart(
+                season_subset,
+                selected_metrics,
+                split_charts,
+                f"Serve Statistics Trend by Date ({season_label})",
+            )
+            if not serve_trend_fig:
+                continue
+            rendered_chart = True
+            add_benchmark_lines(
+                serve_trend_fig,
+                selected_metrics,
+                benchmark_df,
+                selected_baseline_levels,
+            )
+            st.markdown(f"**{season_label}**")
+            st.plotly_chart(
+                serve_trend_fig,
+                width="stretch",
+                key=chart_key(
+                    "serve_trend",
+                    *base_chart_key_parts,
+                    season_label,
+                    selected_metric_labels,
+                ),
+            )
+        if not rendered_chart:
+            st.info("No serve trend data is available for the current filters.")
     else:
-        st.info("No serve trend data is available for the current filters.")
+        serve_trend_fig = plot_metric_line_chart(
+            filtered_df,
+            selected_metrics,
+            split_charts,
+            f"Serve Statistics Trend by Date ({current_scope})",
+        )
+        if serve_trend_fig:
+            add_benchmark_lines(
+                serve_trend_fig,
+                selected_metrics,
+                benchmark_df,
+                selected_baseline_levels,
+            )
+            st.plotly_chart(
+                serve_trend_fig,
+                width="stretch",
+                key=chart_key(
+                    "serve_trend",
+                    *base_chart_key_parts,
+                    selected_metric_labels,
+                ),
+            )
+        else:
+            st.info("No serve trend data is available for the current filters.")
 
 with tabs[4]:
     st.subheader(f"Games Diff Control: {current_scope}")
@@ -1165,11 +1575,37 @@ with tabs[8]:
     st.subheader(f"Pressure Bins: {current_scope}")
     pressure_fig = build_pressure_bins_chart(filtered_df, split_charts, f"Pressure Bins ({current_scope})")
     if pressure_fig:
+        pressure_fig = add_pressure_benchmark_markers(
+            pressure_fig,
+            benchmark_df,
+            selected_baseline_levels,
+        )
         st.plotly_chart(
             pressure_fig,
             width="stretch",
             key=chart_key("pressure_bins", *base_chart_key_parts),
         )
+        if selected_baseline_levels and not benchmark_df.empty:
+            pressure_snapshot_df = build_benchmark_snapshot(
+                filtered_df,
+                benchmark_df,
+                selected_baseline_levels,
+            )
+            if not pressure_snapshot_df.empty and "Metric" in pressure_snapshot_df.columns:
+                pressure_snapshot_df = pressure_snapshot_df[
+                    pressure_snapshot_df["Metric"].isin(["Break Points Won", "Break Points Saved"])
+                ]
+            if not pressure_snapshot_df.empty:
+                pressure_formatters = {
+                    column: "{:.1%}"
+                    for column in pressure_snapshot_df.columns
+                    if column != "Metric"
+                }
+                st.caption("Benchmark markers show where tour baselines land in the pressure tiers.")
+                st.dataframe(
+                    style_banded_rows(pressure_snapshot_df, formatters=pressure_formatters),
+                    width="stretch",
+                )
     else:
         st.info("No pressure-bin data is available for the current filters.")
 
