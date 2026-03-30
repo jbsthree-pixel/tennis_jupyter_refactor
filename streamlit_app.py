@@ -231,6 +231,12 @@ st.markdown(
             color: var(--accent-red);
             border-bottom-color: var(--accent-red);
         }}
+
+        button[data-baseweb="tab"]:nth-of-type(10) {{
+            cursor: not-allowed;
+            opacity: 0.5;
+            pointer-events: none;
+        }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -1265,11 +1271,12 @@ default_csv = PROJECT_ROOT / "data" / "input" / "StatsReport_TeamNames.csv"
 default_benchmark_xlsx = PROJECT_ROOT / "data" / "input" / "Tour Data 2025.xlsx"
 with st.sidebar:
     st.header("Data")
-    input_csv = st.text_input("Source CSV", value=str(default_csv))
-    name_map = st.text_input("Name Map XLSX (optional)", value="")
+    input_csv = st.text_input("Source CSV", value=str(default_csv), disabled=True)
+    name_map = st.text_input("Name Map XLSX (optional)", value="", disabled=True)
     benchmark_xlsx = st.text_input(
         "Tour Benchmark XLSX (optional)",
         value=str(default_benchmark_xlsx) if default_benchmark_xlsx.exists() else "",
+        disabled=True,
     )
     if st.button("Reload Data"):
         st.cache_data.clear()
@@ -1612,11 +1619,13 @@ with tabs[8]:
 with tabs[9]:
     st.subheader("Source Row Edits")
     review_df, review_index_map, source_raw_df = load_source_review_cached(str(source_path), csv_mtime)
+    st.caption("This tab is temporarily visible but disabled.")
     edited_df = st.data_editor(
         review_df,
         width="stretch",
         hide_index=True,
         num_rows="fixed",
+        disabled=True,
         column_config={
             "_review_id": st.column_config.NumberColumn("Review ID", disabled=True),
             "rows_affected": st.column_config.NumberColumn("Rows Affected", disabled=True),
@@ -1624,7 +1633,7 @@ with tabs[9]:
         },
     )
     st.caption("Edit grouped source rows directly here. Use the Delete column to remove grouped rows from the source CSV.")
-    if st.button("Save Source CSV Changes", type="primary"):
+    if st.button("Save Source CSV Changes", type="primary", disabled=True):
         updated_summary = save_source_review_changes(
             edited_df,
             review_index_map,
