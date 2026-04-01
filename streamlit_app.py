@@ -1072,6 +1072,18 @@ def build_funnel_comparison_chart(
     if plot_df.empty:
         return None
 
+    player_palette = [
+        COLORBLIND_SAFE_CHART_COLORS["accent_red"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_gray"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_rose"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_taupe"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_black"],
+    ]
+    player_colors = {
+        player_name: player_palette[index % len(player_palette)]
+        for index, player_name in enumerate(selected_players)
+    }
+
     def funnel_steps(frame: pd.DataFrame):
         totals = frame[required[1:]].sum(numeric_only=True)
         return {
@@ -1101,6 +1113,7 @@ def build_funnel_comparison_chart(
                 y=[label for label, _ in steps],
                 orientation="h",
                 name=player_name,
+                marker_color=player_colors.get(player_name, COLORBLIND_SAFE_CHART_COLORS["accent_red"]),
                 text=[f"{pct:.0%}" for pct in percentages],
                 textposition="outside",
                 customdata=[
