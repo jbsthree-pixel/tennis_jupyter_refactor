@@ -19,6 +19,7 @@ if str(SRC_PATH) not in sys.path:
 
 from tennis_jupyter.analytics import (  # noqa: E402
     available_filter_values,
+    build_player_comparison_summary,
     build_pivot_summary,
     build_raw_data_dictionary,
     build_serve_return_match_stats,
@@ -319,10 +320,24 @@ def image_to_data_uri(path: Path) -> str | None:
     return f"data:image/{image_type};base64,{encoded}"
 
 
-def scope_text(player: str, year: str, month_name: str, opp_team: str, season: str) -> str:
+def scope_text(
+    player: str | list[str],
+    year: str,
+    month_name: str,
+    opp_team: str,
+    season: str,
+) -> str:
     """Create a compact label for the current filter state."""
     labels = []
-    for value in [player, year, month_name, opp_team, season]:
+    if isinstance(player, list):
+        if player and "All" not in player:
+            player_label = ", ".join(player) if len(player) <= 3 else f"{len(player)} players"
+        else:
+            player_label = "All"
+    else:
+        player_label = player
+
+    for value in [player_label, year, month_name, opp_team, season]:
         if value and value != "All":
             labels.append(value)
     return " | ".join(labels) if labels else "Current Filters"
@@ -337,6 +352,42 @@ def chart_key(name: str, *parts: object) -> str:
         else:
             serialized.append(str(part))
     return "::".join(serialized)
+
+
+def render_player_chart_grid(
+    chart_df: pd.DataFrame,
+    selected_players: list[str],
+    key_prefix: str,
+    build_chart,
+    title_builder,
+    chart_key_parts: tuple[object, ...],
+    after_build=None,
+) -> bool:
+    """Render one chart per selected player in a two-column comparison grid."""
+    rendered = False
+    player_list = [player for player in selected_players if player]
+    if not player_list:
+        return rendered
+
+    for row_start in range(0, len(player_list), 2):
+        row_players = player_list[row_start : row_start + 2]
+        columns = st.columns(len(row_players))
+        for col_index, player_name in enumerate(row_players):
+            player_df = chart_df[chart_df["player"] == player_name].copy()
+            with columns[col_index]:
+                figure = build_chart(player_df, title_builder(player_name))
+                if not figure:
+                    st.info(f"No data available for {player_name} in the current filters.")
+                    continue
+                if after_build:
+                    after_build(figure, player_df, player_name)
+                st.plotly_chart(
+                    figure,
+                    width="stretch",
+                    key=chart_key(key_prefix, *chart_key_parts, player_name),
+                )
+                rendered = True
+    return rendered
 
 
 def benchmark_lookup(benchmark_df: pd.DataFrame) -> dict[str, dict[str, float]]:
@@ -998,6 +1049,158 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
     return figure
 
 
+def build_funnel_comparison_chart(
+    chart_df: pd.DataFrame,
+    selected_players: list[str],
+    split_by_result: bool,
+    title: str,
+) -> go.Figure | None:
+    """Render overlaid serve funnels so selected players can be compared directly."""
+    required = [
+        "player",
+        "first_serve_attempt",
+        "first_serve_in",
+        "first_serve_won",
+        "second_serve_attempt",
+        "second_serve_in",
+        "second_serve_won",
+    ]
+    if chart_df.empty or any(column not in chart_df.columns for column in required):
+        return None
+
+    plot_df = chart_df[chart_df["player"].isin(selected_players)].copy()
+    if plot_df.empty:
+        return None
+
+    def funnel_steps(frame: pd.DataFrame):
+        totals = frame[required[1:]].sum(numeric_only=True)
+        return {
+            "First Serve Funnel": [
+                ("1st Attempts", float(totals.get("first_serve_attempt", 0))),
+                ("1st In", float(totals.get("first_serve_in", 0))),
+                ("1st Won", float(totals.get("first_serve_won", 0))),
+            ],
+            "Second Serve Funnel": [
+                ("2nd Attempts", float(totals.get("second_serve_attempt", 0))),
+                ("2nd In", float(totals.get("second_serve_in", 0))),
+                ("2nd Won", float(totals.get("second_serve_won", 0))),
+            ],
+        }
+
+    def add_player_trace(figure: go.Figure, steps, player_name: str, row: int, col: int, showlegend: bool) -> None:
+        base = steps[0][1] if steps and steps[0][1] else 0.0
+        percentages = [value / base if base else 0.0 for _, value in steps]
+        previous = None
+        step_rates = []
+        for _, value in steps:
+            step_rates.append((value / previous) if previous not in (None, 0.0) else 1.0)
+            previous = value
+        figure.add_trace(
+            go.Bar(
+                x=percentages,
+                y=[label for label, _ in steps],
+                orientation="h",
+                name=player_name,
+                text=[f"{pct:.0%}" for pct in percentages],
+                textposition="outside",
+                customdata=[
+                    [raw, pct, step]
+                    for (_, raw), pct, step in zip(steps, percentages, step_rates)
+                ],
+                hovertemplate=(
+                    "%{y}<br>"
+                    f"Player={player_name}<br>"
+                    "Share of attempts=%{customdata[1]:.0%}<br>"
+                    "Raw count=%{customdata[0]:,.0f}<br>"
+                    "Step conversion=%{customdata[2]:.0%}<extra></extra>"
+                ),
+                showlegend=showlegend,
+            ),
+            row=row,
+            col=col,
+        )
+
+    if split_by_result and "Match Result" in plot_df.columns:
+        result_labels = [
+            label
+            for label in ["W", "L"]
+            if not plot_df[plot_df["Match Result"] == label].empty
+        ]
+        if result_labels:
+            figure = make_subplots(
+                rows=len(result_labels),
+                cols=2,
+                subplot_titles=tuple(
+                    f"{result_label}: {panel_title}"
+                    for result_label in result_labels
+                    for panel_title in ["First Serve Funnel", "Second Serve Funnel"]
+                ),
+                vertical_spacing=0.18,
+                horizontal_spacing=0.12,
+            )
+            for row_index, result_label in enumerate(result_labels, start=1):
+                result_df = plot_df[plot_df["Match Result"] == result_label].copy()
+                for player_name in selected_players:
+                    player_df = result_df[result_df["player"] == player_name].copy()
+                    if player_df.empty:
+                        continue
+                    player_steps = funnel_steps(player_df)
+                    add_player_trace(
+                        figure,
+                        player_steps["First Serve Funnel"],
+                        player_name,
+                        row_index,
+                        1,
+                        showlegend=(row_index == 1),
+                    )
+                    add_player_trace(
+                        figure,
+                        player_steps["Second Serve Funnel"],
+                        player_name,
+                        row_index,
+                        2,
+                        showlegend=False,
+                    )
+            if not figure.data:
+                return None
+            for row_index in range(1, len(result_labels) + 1):
+                figure.update_xaxes(range=[0, 1.05], tickformat=".0%", title_text="% of Attempts", row=row_index, col=1)
+                figure.update_xaxes(range=[0, 1.05], tickformat=".0%", title_text="% of Attempts", row=row_index, col=2)
+                figure.update_yaxes(
+                    categoryorder="array",
+                    categoryarray=["1st Won", "1st In", "1st Attempts"],
+                    row=row_index,
+                    col=1,
+                )
+                figure.update_yaxes(
+                    categoryorder="array",
+                    categoryarray=["2nd Won", "2nd In", "2nd Attempts"],
+                    row=row_index,
+                    col=2,
+                )
+            apply_accessible_figure_style(figure, title=title, height=420 * len(result_labels))
+            figure.update_layout(barmode="group", legend_title="Player")
+            return figure
+
+    figure = make_subplots(rows=1, cols=2, subplot_titles=("First Serve Funnel", "Second Serve Funnel"))
+    for player_name in selected_players:
+        player_df = plot_df[plot_df["player"] == player_name].copy()
+        if player_df.empty:
+            continue
+        player_steps = funnel_steps(player_df)
+        add_player_trace(figure, player_steps["First Serve Funnel"], player_name, 1, 1, showlegend=True)
+        add_player_trace(figure, player_steps["Second Serve Funnel"], player_name, 1, 2, showlegend=False)
+
+    if not figure.data:
+        return None
+    figure.update_xaxes(range=[0, 1.05], tickformat=".0%", title_text="% of Attempts")
+    figure.update_yaxes(categoryorder="array", categoryarray=["1st Won", "1st In", "1st Attempts"], row=1, col=1)
+    figure.update_yaxes(categoryorder="array", categoryarray=["2nd Won", "2nd In", "2nd Attempts"], row=1, col=2)
+    apply_accessible_figure_style(figure, title=title, height=500)
+    figure.update_layout(barmode="group", legend_title="Player")
+    return figure
+
+
 def build_rate_heatmap(
     value_matrix: pd.DataFrame,
     title: str,
@@ -1392,6 +1595,59 @@ def build_sets_games_chart(chart_df: pd.DataFrame, title: str) -> go.Figure | No
     return figure
 
 
+def build_player_comparison_chart(comparison_df: pd.DataFrame, title: str) -> go.Figure | None:
+    """Render a grouped comparison chart across selected player metrics."""
+    if comparison_df.empty or "Player" not in comparison_df.columns:
+        return None
+
+    metric_columns = [
+        "Win Rate",
+        "1st Serve In %",
+        "1st Serve Won %",
+        "2nd Serve Won %",
+        "1st Return Won %",
+        "2nd Return Won %",
+        "BP Won %",
+        "BP Saved %",
+    ]
+    available_metric_columns = [
+        column for column in metric_columns if column in comparison_df.columns
+    ]
+    if not available_metric_columns:
+        return None
+
+    plot_df = comparison_df[["Player"] + available_metric_columns].melt(
+        id_vars="Player",
+        var_name="Metric",
+        value_name="Rate",
+    )
+    metric_order = {metric: index for index, metric in enumerate(available_metric_columns)}
+    plot_df["_metric_sort"] = plot_df["Metric"].map(metric_order)
+    plot_df = plot_df.sort_values(["_metric_sort", "Player"]).drop(columns="_metric_sort")
+
+    figure = go.Figure()
+    for player_name in comparison_df["Player"].tolist():
+        player_df = plot_df[plot_df["Player"] == player_name]
+        figure.add_trace(
+            go.Bar(
+                x=player_df["Metric"],
+                y=player_df["Rate"],
+                name=player_name,
+                text=[f"{value:.1%}" for value in player_df["Rate"]],
+                textposition="outside",
+            )
+        )
+    apply_accessible_figure_style(figure, title=title, height=480)
+    figure.update_layout(
+        barmode="group",
+        legend_title="Player",
+        xaxis_title="Metric",
+        yaxis_title="Rate",
+    )
+    figure.update_yaxes(tickformat=".0%", range=[0, 1])
+    return figure
+
+
 banner_logo_path = PROJECT_ROOT / "assets" / "ncstate-circle-blk-kowolf.png"
 banner_logo_uri = image_to_data_uri(banner_logo_path)
 banner_logo_html = (
@@ -1453,7 +1709,13 @@ benchmark_df = with_nc_state_benchmark(benchmark_df, summary_df)
 filter_values = available_filter_values(summary_df)
 with st.sidebar:
     st.header("Filters")
-    selected_player = st.selectbox("Player", filter_values["players"])
+    all_player_options = filter_values["players"][1:]
+    selected_players = st.multiselect(
+        "Players",
+        all_player_options,
+        default=[],
+        help="Leave empty to include all players, or pick any subset to compare.",
+    )
     selected_year = st.selectbox("Year", filter_values["years"])
     selected_month = st.selectbox("Month", filter_values["months"])
     selected_opp_team = st.selectbox("Opp Team", filter_values["opp_teams"])
@@ -1474,15 +1736,15 @@ with st.sidebar:
 
 filtered_df = filter_matches(
     summary_df,
-    player=selected_player,
+    player=selected_players,
     year=None if selected_year == "All" else int(selected_year),
     month_name=selected_month,
     opp_team=selected_opp_team,
     season_label=selected_season,
 )
-current_scope = scope_text(selected_player, selected_year, selected_month, selected_opp_team, selected_season)
+current_scope = scope_text(selected_players, selected_year, selected_month, selected_opp_team, selected_season)
 base_chart_key_parts = (
-    selected_player,
+    tuple(selected_players),
     selected_year,
     selected_month,
     selected_opp_team,
@@ -1533,6 +1795,30 @@ tabs = st.tabs(
 
 with tabs[0]:
     st.subheader(f"Overview: {current_scope}")
+    comparison_df = build_player_comparison_summary(filtered_df, player_order=selected_players)
+    unique_players = comparison_df["Player"].nunique() if "Player" in comparison_df.columns else 0
+    if len(selected_players) > 1 and unique_players > 1:
+        st.markdown("**Player Comparison**")
+        comparison_formatters = {
+            column: "{:.1%}"
+            for column in comparison_df.columns
+            if "%" in column or column == "Win Rate"
+        }
+        st.dataframe(
+            style_banded_rows(comparison_df, formatters=comparison_formatters),
+            width="stretch",
+        )
+        comparison_fig = build_player_comparison_chart(
+            comparison_df,
+            f"Selected Player Comparison ({current_scope})",
+        )
+        if comparison_fig:
+            st.plotly_chart(
+                comparison_fig,
+                width="stretch",
+                key=chart_key("player_comparison", *base_chart_key_parts),
+            )
+
     overview_col1, overview_col2 = st.columns(2)
     win_loss_fig = build_win_loss_chart(filtered_df, f"Win/Loss Trend ({current_scope})")
     sets_games_fig = build_sets_games_chart(filtered_df, f"Sets & Games by Year ({current_scope})")
@@ -1616,7 +1902,61 @@ with tabs[3]:
     selected_metrics = [
         metric for metric in SERVE_TREND_METRICS if metric[0] in selected_metric_labels
     ]
-    if selected_season == "All":
+    if len(selected_players) > 1 and selected_metrics:
+        season_chart_df = with_season_columns(filtered_df)
+        if selected_season == "All":
+            available_seasons = (
+                season_chart_df[["_Season Sort", "_Season Label"]]
+                .drop_duplicates()
+                .sort_values(["_Season Sort", "_Season Label"], na_position="last")
+            )
+            rendered_chart = False
+            for _, season_row in available_seasons.iterrows():
+                season_label = str(season_row["_Season Label"])
+                season_subset = season_chart_df[season_chart_df["_Season Label"] == season_label].copy()
+                st.markdown(f"**{season_label}**")
+                rendered_chart = render_player_chart_grid(
+                    season_subset,
+                    selected_players,
+                    "serve_trend_compare",
+                    lambda frame, title: plot_metric_line_chart(frame, selected_metrics, split_charts, title),
+                    lambda player_name: f"{player_name} Serve Trend ({season_label})",
+                    (*base_chart_key_parts, season_label, tuple(selected_metric_labels)),
+                    after_build=(
+                        None
+                        if split_charts
+                        else lambda figure, frame, _player_name: add_benchmark_lines(
+                            figure,
+                            selected_metrics,
+                            benchmark_df,
+                            selected_baseline_levels,
+                        )
+                    ),
+                ) or rendered_chart
+            if not rendered_chart:
+                st.info("No serve trend comparison data is available for the current filters.")
+        else:
+            rendered_chart = render_player_chart_grid(
+                filtered_df,
+                selected_players,
+                "serve_trend_compare",
+                lambda frame, title: plot_metric_line_chart(frame, selected_metrics, split_charts, title),
+                lambda player_name: f"{player_name} Serve Trend ({current_scope})",
+                (*base_chart_key_parts, tuple(selected_metric_labels)),
+                after_build=(
+                    None
+                    if split_charts
+                    else lambda figure, frame, _player_name: add_benchmark_lines(
+                        figure,
+                        selected_metrics,
+                        benchmark_df,
+                        selected_baseline_levels,
+                    )
+                ),
+            )
+            if not rendered_chart:
+                st.info("No serve trend comparison data is available for the current filters.")
+    elif selected_season == "All":
         season_chart_df = with_season_columns(filtered_df)
         available_seasons = (
             season_chart_df[["_Season Sort", "_Season Label"]]
@@ -1690,15 +2030,27 @@ with tabs[4]:
         if split_charts
         else f"Games Differential Control ({current_scope})"
     )
-    games_diff_fig = build_games_diff_chart(filtered_df, split_charts, games_diff_title)
-    if games_diff_fig:
-        st.plotly_chart(
-            games_diff_fig,
-            width="stretch",
-            key=chart_key("games_diff", *base_chart_key_parts),
+    if len(selected_players) > 1:
+        rendered_chart = render_player_chart_grid(
+            filtered_df,
+            selected_players,
+            "games_diff_compare",
+            lambda frame, title: build_games_diff_chart(frame, split_charts, title),
+            lambda player_name: f"{player_name} Games Differential Control",
+            base_chart_key_parts,
         )
+        if not rendered_chart:
+            st.info("No games-diff comparison data is available for the current filters.")
     else:
-        st.info("No games-diff data is available for the current filters.")
+        games_diff_fig = build_games_diff_chart(filtered_df, split_charts, games_diff_title)
+        if games_diff_fig:
+            st.plotly_chart(
+                games_diff_fig,
+                width="stretch",
+                key=chart_key("games_diff", *base_chart_key_parts),
+            )
+        else:
+            st.info("No games-diff data is available for the current filters.")
 
 with tabs[5]:
     st.subheader(f"Serve Efficiency Funnel: {current_scope}")
@@ -1707,15 +2059,31 @@ with tabs[5]:
         if split_charts
         else f"Serve Efficiency Funnel ({current_scope})"
     )
-    funnel_fig = build_funnel_chart(filtered_df, split_charts, funnel_title)
-    if funnel_fig:
-        st.plotly_chart(
-            funnel_fig,
-            width="stretch",
-            key=chart_key("serve_funnel", *base_chart_key_parts),
+    if len(selected_players) > 1:
+        funnel_compare_fig = build_funnel_comparison_chart(
+            filtered_df,
+            selected_players,
+            split_charts,
+            f"Serve Efficiency Funnel Comparison ({current_scope})",
         )
+        if funnel_compare_fig:
+            st.plotly_chart(
+                funnel_compare_fig,
+                width="stretch",
+                key=chart_key("serve_funnel_compare", *base_chart_key_parts),
+            )
+        else:
+            st.info("No serve funnel comparison data is available for the current filters.")
     else:
-        st.info("No serve funnel data is available for the current filters.")
+        funnel_fig = build_funnel_chart(filtered_df, split_charts, funnel_title)
+        if funnel_fig:
+            st.plotly_chart(
+                funnel_fig,
+                width="stretch",
+                key=chart_key("serve_funnel", *base_chart_key_parts),
+            )
+        else:
+            st.info("No serve funnel data is available for the current filters.")
 
 with tabs[6]:
     st.subheader(f"Rally Length Wins: {current_scope}")
@@ -1724,15 +2092,27 @@ with tabs[6]:
         if split_charts
         else f"Rally Profile vs Match Wins (win rate by bin) ({current_scope})"
     )
-    rally_profile_fig = build_rally_profile_chart(filtered_df, split_charts, rally_profile_title)
-    if rally_profile_fig:
-        st.plotly_chart(
-            rally_profile_fig,
-            width="stretch",
-            key=chart_key("rally_profile", *base_chart_key_parts),
+    if len(selected_players) > 1:
+        rendered_chart = render_player_chart_grid(
+            filtered_df,
+            selected_players,
+            "rally_profile_compare",
+            lambda frame, title: build_rally_profile_chart(frame, split_charts, title),
+            lambda player_name: f"{player_name} Rally Profile vs Match Wins",
+            base_chart_key_parts,
         )
+        if not rendered_chart:
+            st.info("No rally profile comparison data is available for the current filters.")
     else:
-        st.info("No rally profile data is available for the current filters.")
+        rally_profile_fig = build_rally_profile_chart(filtered_df, split_charts, rally_profile_title)
+        if rally_profile_fig:
+            st.plotly_chart(
+                rally_profile_fig,
+                width="stretch",
+                key=chart_key("rally_profile", *base_chart_key_parts),
+            )
+        else:
+            st.info("No rally profile data is available for the current filters.")
 
 with tabs[7]:
     st.subheader(f"Rally Bins: {current_scope}")
@@ -1741,15 +2121,27 @@ with tabs[7]:
         if split_charts
         else f"Rally Length Bins (% of Total Sets) ({current_scope})"
     )
-    rally_bins_fig = build_rally_bins_chart(filtered_df, split_charts, rally_bins_title)
-    if rally_bins_fig:
-        st.plotly_chart(
-            rally_bins_fig,
-            width="stretch",
-            key=chart_key("rally_bins", *base_chart_key_parts),
+    if len(selected_players) > 1:
+        rendered_chart = render_player_chart_grid(
+            filtered_df,
+            selected_players,
+            "rally_bins_compare",
+            lambda frame, title: build_rally_bins_chart(frame, split_charts, title),
+            lambda player_name: f"{player_name} Rally Length Bins",
+            base_chart_key_parts,
         )
+        if not rendered_chart:
+            st.info("No rally-bin comparison data is available for the current filters.")
     else:
-        st.info("No rally-bin data is available for the current filters.")
+        rally_bins_fig = build_rally_bins_chart(filtered_df, split_charts, rally_bins_title)
+        if rally_bins_fig:
+            st.plotly_chart(
+                rally_bins_fig,
+                width="stretch",
+                key=chart_key("rally_bins", *base_chart_key_parts),
+            )
+        else:
+            st.info("No rally-bin data is available for the current filters.")
 
 with tabs[8]:
     st.subheader(f"Pressure Bins: {current_scope}")
@@ -1758,36 +2150,62 @@ with tabs[8]:
         if split_charts
         else f"Pressure Performance Bins (% of Total Sets) ({current_scope})"
     )
-    pressure_fig = build_pressure_bins_chart(filtered_df, split_charts, pressure_title)
-    if pressure_fig:
-        st.plotly_chart(
-            pressure_fig,
-            width="stretch",
-            key=chart_key("pressure_bins", *base_chart_key_parts),
+    if len(selected_players) > 1:
+        rendered_chart = render_player_chart_grid(
+            filtered_df,
+            selected_players,
+            "pressure_bins_compare",
+            lambda frame, title: build_pressure_bins_chart(frame, split_charts, title),
+            lambda player_name: f"{player_name} Pressure Performance Bins",
+            base_chart_key_parts,
         )
-        if selected_baseline_levels and not benchmark_df.empty:
-            pressure_snapshot_df = build_benchmark_snapshot(
-                filtered_df,
-                benchmark_df,
-                selected_baseline_levels,
-            )
-            if not pressure_snapshot_df.empty and "Metric" in pressure_snapshot_df.columns:
-                pressure_snapshot_df = pressure_snapshot_df[
-                    pressure_snapshot_df["Metric"].isin(["Break Points Won", "Break Points Saved"])
-                ]
-            if not pressure_snapshot_df.empty:
+        if rendered_chart and selected_baseline_levels and not benchmark_df.empty:
+            pressure_comparison_df = build_player_comparison_summary(filtered_df, player_order=selected_players)
+            if not pressure_comparison_df.empty:
+                pressure_comparison_df = pressure_comparison_df[["Player", "BP Won %", "BP Saved %"]]
                 pressure_formatters = {
                     column: "{:.1%}"
-                    for column in pressure_snapshot_df.columns
-                    if column != "Metric"
+                    for column in pressure_comparison_df.columns
+                    if column != "Player"
                 }
-                st.caption("Pressure baseline values are summarized below the chart.")
+                st.caption("Break-point comparison summary for the selected players.")
                 st.dataframe(
-                    style_banded_rows(pressure_snapshot_df, formatters=pressure_formatters),
+                    style_banded_rows(pressure_comparison_df, formatters=pressure_formatters),
                     width="stretch",
                 )
+        elif not rendered_chart:
+            st.info("No pressure-bin comparison data is available for the current filters.")
     else:
-        st.info("No pressure-bin data is available for the current filters.")
+        pressure_fig = build_pressure_bins_chart(filtered_df, split_charts, pressure_title)
+        if pressure_fig:
+            st.plotly_chart(
+                pressure_fig,
+                width="stretch",
+                key=chart_key("pressure_bins", *base_chart_key_parts),
+            )
+            if selected_baseline_levels and not benchmark_df.empty:
+                pressure_snapshot_df = build_benchmark_snapshot(
+                    filtered_df,
+                    benchmark_df,
+                    selected_baseline_levels,
+                )
+                if not pressure_snapshot_df.empty and "Metric" in pressure_snapshot_df.columns:
+                    pressure_snapshot_df = pressure_snapshot_df[
+                        pressure_snapshot_df["Metric"].isin(["Break Points Won", "Break Points Saved"])
+                    ]
+                if not pressure_snapshot_df.empty:
+                    pressure_formatters = {
+                        column: "{:.1%}"
+                        for column in pressure_snapshot_df.columns
+                        if column != "Metric"
+                    }
+                    st.caption("Pressure baseline values are summarized below the chart.")
+                    st.dataframe(
+                        style_banded_rows(pressure_snapshot_df, formatters=pressure_formatters),
+                        width="stretch",
+                    )
+        else:
+            st.info("No pressure-bin data is available for the current filters.")
 
 with tabs[9]:
     st.subheader("Source Row Edits")

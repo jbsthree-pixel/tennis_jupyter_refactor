@@ -13,7 +13,7 @@ from .shared import safe_ratio
 
 def filter_matches(
     df: pd.DataFrame,
-    player: str | None = None,
+    player: str | list[str] | tuple[str, ...] | set[str] | None = None,
     year: int | None = None,
     month_name: str | None = None,
     opp_team: str | None = None,
@@ -22,8 +22,19 @@ def filter_matches(
     """Filter the match-summary dataframe using app-friendly selectors."""
     filtered = with_season_columns(df)
 
-    if player and player != "All":
-        filtered = filtered[filtered["player"] == player]
+    if isinstance(player, str):
+        selected_players = [player] if player and player != "All" else []
+    elif player:
+        selected_players = [
+            str(value)
+            for value in player
+            if value and str(value) != "All"
+        ]
+    else:
+        selected_players = []
+
+    if selected_players:
+        filtered = filtered[filtered["player"].isin(selected_players)]
     if year is not None:
         filtered = filtered[filtered["Match Year"] == year]
     if month_name and month_name != "All":
@@ -183,6 +194,141 @@ def build_pivot_summary(df: pd.DataFrame) -> pd.DataFrame:
     numeric_columns = combined.select_dtypes(include="number").columns
     combined[numeric_columns] = combined[numeric_columns].fillna(0).astype(int)
     return combined
+
+
+def build_player_comparison_summary(
+    df: pd.DataFrame,
+    player_order: list[str] | None = None,
+) -> pd.DataFrame:
+    """Build one comparison row per player for side-by-side analysis."""
+    if df.empty or "player" not in df.columns:
+        return pd.DataFrame()
+
+    calc_df = with_season_columns(df)
+    required_defaults = [
+        "first_serve_attempt",
+        "first_serve_in",
+        "first_serve_won",
+        "second_serve_attempt",
+        "second_serve_won",
+        "first_serve_return_opportunity",
+        "first_serve_return_won",
+        "second_serve_return_opportunity",
+        "second_serve_return_won",
+        "break_point_total",
+        "break_point_won",
+        "break_point_faced",
+        "break_point_saved",
+    ]
+    for column in required_defaults:
+        if column not in calc_df.columns:
+            calc_df[column] = 0
+
+    comparison = (
+        calc_df.groupby("player", dropna=False)
+        .agg(
+            Matches=("matchId", "nunique"),
+            Wins=("Match Result", lambda values: (values == "W").sum()),
+            Losses=("Match Result", lambda values: (values == "L").sum()),
+            Sets_Won=("Sets Won", "sum"),
+            Sets_Lost=("Sets Lost", "sum"),
+            Games_Won=("Games Won", "sum"),
+            Games_Lost=("Games Lost", "sum"),
+            First_Serve_Attempts=("first_serve_attempt", "sum"),
+            First_Serve_In=("first_serve_in", "sum"),
+            First_Serve_Won=("first_serve_won", "sum"),
+            Second_Serve_Attempts=("second_serve_attempt", "sum"),
+            Second_Serve_Won=("second_serve_won", "sum"),
+            First_Return_Opps=("first_serve_return_opportunity", "sum"),
+            First_Return_Won=("first_serve_return_won", "sum"),
+            Second_Return_Opps=("second_serve_return_opportunity", "sum"),
+            Second_Return_Won=("second_serve_return_won", "sum"),
+            Break_Points_Earned=("break_point_total", "sum"),
+            Break_Points_Converted=("break_point_won", "sum"),
+            Break_Points_Faced=("break_point_faced", "sum"),
+            Break_Points_Saved=("break_point_saved", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"player": "Player"})
+    )
+
+    comparison["Win Rate"] = safe_ratio(comparison["Wins"], comparison["Matches"])
+    comparison["1st Serve In %"] = safe_ratio(
+        comparison["First_Serve_In"],
+        comparison["First_Serve_Attempts"],
+    )
+    comparison["1st Serve Won %"] = safe_ratio(
+        comparison["First_Serve_Won"],
+        comparison["First_Serve_In"],
+    )
+    comparison["2nd Serve Won %"] = safe_ratio(
+        comparison["Second_Serve_Won"],
+        comparison["Second_Serve_Attempts"],
+    )
+    comparison["1st Return Won %"] = safe_ratio(
+        comparison["First_Return_Won"],
+        comparison["First_Return_Opps"],
+    )
+    comparison["2nd Return Won %"] = safe_ratio(
+        comparison["Second_Return_Won"],
+        comparison["Second_Return_Opps"],
+    )
+    comparison["BP Won %"] = safe_ratio(
+        comparison["Break_Points_Converted"],
+        comparison["Break_Points_Earned"],
+    )
+    comparison["BP Saved %"] = safe_ratio(
+        comparison["Break_Points_Saved"],
+        comparison["Break_Points_Faced"],
+    )
+
+    comparison = comparison[
+        [
+            "Player",
+            "Matches",
+            "Wins",
+            "Losses",
+            "Win Rate",
+            "Sets_Won",
+            "Sets_Lost",
+            "Games_Won",
+            "Games_Lost",
+            "1st Serve In %",
+            "1st Serve Won %",
+            "2nd Serve Won %",
+            "1st Return Won %",
+            "2nd Return Won %",
+            "BP Won %",
+            "BP Saved %",
+        ]
+    ].rename(
+        columns={
+            "Sets_Won": "Sets Won",
+            "Sets_Lost": "Sets Lost",
+            "Games_Won": "Games Won",
+            "Games_Lost": "Games Lost",
+        }
+    )
+
+    if player_order:
+        rank = {player: index for index, player in enumerate(player_order)}
+        comparison["_player_sort"] = comparison["Player"].map(rank).fillna(len(rank))
+        comparison = comparison.sort_values(["_player_sort", "Player"]).drop(columns="_player_sort")
+    else:
+        comparison = comparison.sort_values(
+            ["Matches", "Wins", "Player"],
+            ascending=[False, False, True],
+        )
+
+    numeric_columns = comparison.select_dtypes(include="number").columns
+    count_columns = ["Matches", "Wins", "Losses", "Sets Won", "Sets Lost", "Games Won", "Games Lost"]
+    for column in count_columns:
+        if column in comparison.columns:
+            comparison[column] = comparison[column].fillna(0).astype(int)
+    comparison[numeric_columns.difference(count_columns)] = comparison[
+        numeric_columns.difference(count_columns)
+    ].fillna(0.0)
+    return comparison.reset_index(drop=True)
 
 
 def build_serve_return_match_stats(df: pd.DataFrame) -> pd.DataFrame:
