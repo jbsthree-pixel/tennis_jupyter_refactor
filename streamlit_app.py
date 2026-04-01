@@ -36,7 +36,7 @@ from tennis_jupyter.constants import (  # noqa: E402
     PIVOT_ACE_COLUMN_DEFS,
     SERVE_TREND_METRICS,
 )
-from tennis_jupyter.notebook import load_match_summary  # noqa: E402
+from tennis_jupyter.notebook import build_match_watch_url, load_match_summary  # noqa: E402
 from tennis_jupyter.reporting import write_excel_report  # noqa: E402
 from tennis_jupyter.shared import safe_ratio  # noqa: E402
 
@@ -292,6 +292,7 @@ def style_banded_rows(
     df: pd.DataFrame,
     hide_index: bool = True,
     formatters: dict[str, str | callable] | None = None,
+    escape: str | None = "html",
 ) -> pd.io.formats.style.Styler:
     """Apply alternating row shading to read-only dataframes."""
     band_color = "rgba(204, 0, 0, 0.08)"
@@ -305,7 +306,7 @@ def style_banded_rows(
         axis=1,
     )
     if formatters:
-        styler = styler.format(formatters)
+        styler = styler.format(formatters, escape=escape)
     if hide_index:
         styler = styler.hide(axis="index")
     return styler
@@ -1873,8 +1874,19 @@ with tabs[2]:
             for column in display_df.columns
             if "%" in column
         }
+        if "Match ID" in display_df.columns:
+            display_df = display_df.copy()
+            display_df["Match ID"] = display_df["Match ID"].map(build_match_watch_url)
         st.dataframe(
             style_banded_rows(display_df, formatters=percent_formatters),
+            column_config={
+                "Match ID": st.column_config.LinkColumn(
+                    "Match ID",
+                    display_text=r".*/watch/(.*)$",
+                )
+            }
+            if "Match ID" in display_df.columns
+            else None,
             width="stretch",
         )
         benchmark_snapshot_df = build_benchmark_snapshot(

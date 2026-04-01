@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -11,6 +12,8 @@ from .analytics import filter_matches, summarize_key_insights
 from .pipeline import build_match_summary
 from .reporting import write_excel_report
 from .shared import output_path, safe_ratio
+
+MATCH_WATCH_URL_PREFIX = "https://www.cizrtennis.com/userMatches//watch/"
 
 
 def load_match_summary(
@@ -90,3 +93,37 @@ def export_outputs(
     df.to_csv(csv_path, index=False)
     write_excel_report(df, excel_path)
     return csv_path, excel_path
+
+
+def build_match_watch_url(match_id: object) -> str:
+    """Build the watch URL for a match id."""
+    if pd.isna(match_id):
+        return ""
+    match_id_text = str(match_id).strip()
+    if not match_id_text:
+        return ""
+    return f"{MATCH_WATCH_URL_PREFIX}{match_id_text}"
+
+
+def format_match_id_link(match_id: object) -> str:
+    """Render a match id as a clickable watch URL for notebook HTML output."""
+    match_id_text = build_match_watch_url(match_id).replace(MATCH_WATCH_URL_PREFIX, "", 1)
+    if not match_id_text:
+        return ""
+
+    escaped_id = html.escape(match_id_text)
+    return (
+        f'<a href="{MATCH_WATCH_URL_PREFIX}{escaped_id}" '
+        f'target="_blank" rel="noopener noreferrer">{escaped_id}</a>'
+    )
+
+
+def style_clickable_match_ids(
+    df: pd.DataFrame,
+    match_id_column: str = "Match ID",
+) -> pd.io.formats.style.Styler:
+    """Return a notebook-friendly styler with clickable links in the match id column."""
+    styler = df.style
+    if match_id_column in df.columns:
+        styler = styler.format({match_id_column: format_match_id_link}, escape=None)
+    return styler
