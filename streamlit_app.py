@@ -438,8 +438,19 @@ def add_benchmark_lines(
                 line_dash=line_styles[level]["dash"],
                 line_color=line_styles[level]["color"],
                 opacity=0.9,
-                annotation_text=f"{metric_label} {level}: {baseline_value:.1%}",
-                annotation_position="top left",
+            )
+            figure.add_annotation(
+                xref="paper",
+                yref="y",
+                x=1.01,
+                y=baseline_value,
+                text=f"{metric_label} {level}: {baseline_value:.1%}",
+                showarrow=False,
+                xanchor="left",
+                yanchor="middle",
+                align="left",
+                font={"color": line_styles[level]["color"], "size": 12},
+                bgcolor="rgba(255, 253, 248, 0.92)",
             )
 
 
@@ -612,6 +623,17 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
         else title
     )
     apply_accessible_figure_style(figure, title=display_title, height=860 if split_by_result and "Match Result" in plot_df.columns else 500)
+    figure.update_layout(
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0,
+            "title": {"text": "Metric"},
+        },
+        margin={"t": 120, "r": 240},
+    )
     if not (split_by_result and "Match Result" in plot_df.columns):
         figure.update_xaxes(
             title_text="Match Order (chronological)",
