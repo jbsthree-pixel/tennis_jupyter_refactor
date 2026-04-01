@@ -443,65 +443,6 @@ def add_benchmark_lines(
             )
 
 
-def benchmark_tier(value: float | None) -> str | None:
-    """Map a rate onto the pressure heatmap tiers."""
-    if value is None or pd.isna(value):
-        return None
-    if value <= 0.35:
-        return "Low"
-    if value <= 0.55:
-        return "Mid"
-    return "High"
-
-
-def add_pressure_benchmark_markers(
-    figure: go.Figure | None,
-    benchmark_df: pd.DataFrame,
-    selected_levels: list[str],
-) -> go.Figure | None:
-    """Mark the benchmark pressure tiers directly on the heatmap."""
-    if figure is None or benchmark_df.empty or not selected_levels:
-        return figure
-
-    lookup = benchmark_lookup(benchmark_df)
-    bp_won = lookup.get("Break Points Won", {})
-    bp_saved = lookup.get("Break Points Saved", {})
-    marker_symbols = {"Tour Avg": "circle-open", "Top 10 Avg": "diamond-open"}
-    marker_colors = {
-        "Tour Avg": COLORBLIND_SAFE_CHART_COLORS["accent_black"],
-        "Top 10 Avg": COLORBLIND_SAFE_CHART_COLORS["accent_taupe"],
-    }
-
-    for level in selected_levels:
-        x_tier = benchmark_tier(bp_won.get(level))
-        y_tier = benchmark_tier(bp_saved.get(level))
-        if not x_tier or not y_tier:
-            continue
-        figure.add_trace(
-            go.Scatter(
-                x=[x_tier],
-                y=[y_tier],
-                mode="markers+text",
-                name=f"{level} Baseline",
-                text=[level],
-                textposition="top center",
-                marker={
-                    "symbol": marker_symbols[level],
-                    "size": 18,
-                    "color": marker_colors[level],
-                    "line": {"width": 2, "color": marker_colors[level]},
-                },
-                hovertemplate=(
-                    f"{level}<br>"
-                    f"Break Points Won={bp_won[level]:.1%}<br>"
-                    f"Break Points Saved={bp_saved[level]:.1%}<extra></extra>"
-                ),
-            )
-        )
-
-    return figure
-
-
 def tier_from_quantiles(series: pd.Series) -> pd.Categorical:
     """Bucket continuous values into low, mid, high tiers."""
     labels = ["Low", "Mid", "High"]
@@ -1749,11 +1690,6 @@ with tabs[8]:
     )
     pressure_fig = build_pressure_bins_chart(filtered_df, split_charts, pressure_title)
     if pressure_fig:
-        pressure_fig = add_pressure_benchmark_markers(
-            pressure_fig,
-            benchmark_df,
-            selected_baseline_levels,
-        )
         st.plotly_chart(
             pressure_fig,
             width="stretch",
@@ -1775,7 +1711,7 @@ with tabs[8]:
                     for column in pressure_snapshot_df.columns
                     if column != "Metric"
                 }
-                st.caption("Benchmark markers show where tour baselines land in the pressure tiers.")
+                st.caption("Pressure baseline values are summarized below the chart.")
                 st.dataframe(
                     style_banded_rows(pressure_snapshot_df, formatters=pressure_formatters),
                     width="stretch",
