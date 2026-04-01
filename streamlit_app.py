@@ -596,12 +596,27 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
             for match_date in tick_rows["Match Date"]
         ]
 
-    figure = go.Figure()
     if split_by_result and "Match Result" in plot_df.columns:
-        for result_label, dash in [("W", "solid"), ("L", "dash")]:
+        subsets: list[tuple[str, pd.DataFrame]] = []
+        for result_label in ["W", "L"]:
             subset = plot_df[plot_df["Match Result"] == result_label].copy()
             if subset.empty:
                 continue
+            subset = subset.reset_index(drop=True)
+            subset["Match Sequence"] = range(1, len(subset) + 1)
+            subsets.append((result_label, subset))
+
+        if not subsets:
+            return None
+
+        figure = make_subplots(
+            rows=len(subsets),
+            cols=1,
+            shared_xaxes=False,
+            vertical_spacing=0.22,
+            subplot_titles=tuple(f"{result_label}: Serve Statistics Trend" for result_label, _ in subsets),
+        )
+        for row_index, (result_label, subset) in enumerate(subsets, start=1):
             for label, numer, denom, color in selected_metrics:
                 values = safe_ratio(subset[numer], subset[denom]).tolist()
                 figure.add_trace(
@@ -609,14 +624,32 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
                         x=subset["Match Sequence"],
                         y=values,
                         mode="lines+markers",
-                        name=f"{result_label} - {label}",
-                        line={"color": color, "dash": dash},
+                        name=label,
+                        line={"color": color},
                         marker={"symbol": marker_symbols.get(label, "circle"), "size": 9},
                         customdata=build_customdata(subset),
                         hovertemplate=hover_template,
-                    )
+                        showlegend=(row_index == 1),
+                    ),
+                    row=row_index,
+                    col=1,
                 )
+            figure.update_xaxes(
+                title_text="Match Order (chronological)",
+                tickmode="linear",
+                dtick=1 if len(subset) <= 15 else max(1, len(subset) // 8),
+                row=row_index,
+                col=1,
+            )
+            figure.update_yaxes(
+                title_text="Rate",
+                tickformat=".0%",
+                range=[0, 1],
+                row=row_index,
+                col=1,
+            )
     else:
+        figure = go.Figure()
         for label, numer, denom, color in selected_metrics:
             values = safe_ratio(plot_df[numer], plot_df[denom]).tolist()
             figure.add_trace(
@@ -630,15 +663,21 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
                     customdata=build_customdata(plot_df),
                     hovertemplate=hover_template,
                 )
-            )
+                )
 
-    apply_accessible_figure_style(figure, title=title, height=500)
-    figure.update_xaxes(
-        title_text="Match Order (chronological)",
-        tickmode="linear",
-        dtick=1 if len(plot_df) <= 15 else max(1, len(plot_df) // 8),
+    display_title = (
+        title.replace("Serve Statistics Trend by Date", "Serve Statistics Trend by Match Split W/L")
+        if split_by_result and "Match Result" in plot_df.columns
+        else title
     )
-    if top_tickvals and top_ticktext:
+    apply_accessible_figure_style(figure, title=display_title, height=860 if split_by_result and "Match Result" in plot_df.columns else 500)
+    if not (split_by_result and "Match Result" in plot_df.columns):
+        figure.update_xaxes(
+            title_text="Match Order (chronological)",
+            tickmode="linear",
+            dtick=1 if len(plot_df) <= 15 else max(1, len(plot_df) // 8),
+        )
+    if top_tickvals and top_ticktext and not (split_by_result and "Match Result" in plot_df.columns):
         figure.update_layout(
             xaxis2={
                 "overlaying": "x",
@@ -650,7 +689,8 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
                 "showgrid": False,
             }
         )
-    figure.update_yaxes(title_text="Rate", tickformat=".0%", range=[0, 1])
+    if not (split_by_result and "Match Result" in plot_df.columns):
+        figure.update_yaxes(title_text="Rate", tickformat=".0%", range=[0, 1])
     return figure
 
 
@@ -679,9 +719,17 @@ def build_games_diff_chart(chart_df: pd.DataFrame, split_by_result: bool, title:
     if chart_df.empty or any(column not in chart_df.columns for column in ["Games Won", "Games Lost"]):
         return None
 
-    def add_control_traces(figure: go.Figure, frame: pd.DataFrame, label_prefix: str = "") -> None:
+    def add_control_traces(
+        figure: go.Figure,
+        frame: pd.DataFrame,
+        *,
+        row: int = 1,
+        col: int = 1,
+        show_legend: bool = True,
+        use_subplots: bool = False,
+    ) -> bool:
         if frame.empty:
-            return
+            return False
         values = (
             pd.to_numeric(frame["Games Won"], errors="coerce").fillna(0)
             - pd.to_numeric(frame["Games Lost"], errors="coerce").fillna(0)
@@ -691,15 +739,39 @@ def build_games_diff_chart(chart_df: pd.DataFrame, split_by_result: bool, title:
         std_value = float(values.std(ddof=1)) if len(values) > 1 else 0.0
         ucl = mean_value + 3 * std_value
         lcl = mean_value - 3 * std_value
-        name_prefix = f"{label_prefix} " if label_prefix else ""
+        marker_colors = [
+            COLORBLIND_SAFE_CHART_COLORS["accent_gray"]
+            if value > ucl or value < lcl
+            else COLORBLIND_SAFE_CHART_COLORS["accent_red"]
+            for value in values
+        ]
 
-        figure.add_trace(
+        def add_trace(trace: go.BaseTraceType) -> None:
+            if use_subplots:
+                figure.add_trace(trace, row=row, col=col)
+            else:
+                figure.add_trace(trace)
+
+        add_trace(
             go.Scatter(
                 x=x_values,
                 y=values,
-                mode="lines+markers",
-                name=f"{name_prefix}Games Diff".strip(),
-                line={"color": COLORBLIND_SAFE_CHART_COLORS["accent_red"]},
+                mode="lines",
+                name="Games Diff",
+                line={"color": "#808080", "width": 1.2},
+                hovertemplate="Match Sequence=%{x}<br>Games Diff=%{y:.0f}<extra></extra>",
+                showlegend=False,
+            )
+        )
+        add_trace(
+            go.Scatter(
+                x=x_values,
+                y=values,
+                mode="markers",
+                name="Games Diff",
+                marker={"color": marker_colors, "size": 8},
+                hovertemplate="Match Sequence=%{x}<br>Games Diff=%{y:.0f}<extra></extra>",
+                showlegend=False,
             )
         )
         for line_value, name, dash in [
@@ -712,34 +784,69 @@ def build_games_diff_chart(chart_df: pd.DataFrame, split_by_result: bool, title:
                 "UCL": COLORBLIND_SAFE_CHART_COLORS["accent_gray"],
                 "LCL": COLORBLIND_SAFE_CHART_COLORS["accent_taupe"],
             }[name]
-            figure.add_trace(
+            add_trace(
                 go.Scatter(
                     x=x_values,
                     y=[line_value] * len(x_values),
                     mode="lines",
-                    name=f"{name_prefix}{name}".strip(),
+                    name=f"{name} {line_value:.2f}",
                     line={"dash": dash, "color": line_color},
+                    hoverinfo="skip",
+                    showlegend=show_legend,
                 )
             )
+        add_trace(
+            go.Scatter(
+                x=x_values,
+                y=[0] * len(x_values),
+                mode="lines",
+                name="Zero",
+                line={"dash": "dot", "color": "#4D4D4D", "width": 1.0},
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+        return True
 
-    figure = go.Figure()
     plot_df = chart_df.copy()
     sort_columns = [column for column in ["Match Date", "matchId"] if column in plot_df.columns]
     if sort_columns:
         plot_df = plot_df.sort_values(sort_columns, na_position="last")
 
     if split_by_result and "Match Result" in plot_df.columns:
-        for result_label in ["W", "L"]:
-            add_control_traces(figure, plot_df[plot_df["Match Result"] == result_label], result_label)
+        subsets = [(label, plot_df[plot_df["Match Result"] == label].copy()) for label in ["W", "L"]]
+        subsets = [(label, frame) for label, frame in subsets if not frame.empty]
+        if len(subsets) >= 2:
+            figure = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=False,
+                subplot_titles=tuple(f"{label}: Games Differential Control" for label, _ in subsets[:2]),
+                vertical_spacing=0.18,
+            )
+            for row_index, (_label, frame) in enumerate(subsets[:2], start=1):
+                add_control_traces(figure, frame, row=row_index, col=1, show_legend=(row_index == 1), use_subplots=True)
+                figure.update_xaxes(title_text="Match Sequence", row=row_index, col=1)
+                figure.update_yaxes(title_text="Games Won - Games Lost", row=row_index, col=1)
+            apply_accessible_figure_style(figure, title=title, height=860)
+            return figure
+        elif subsets:
+            figure = go.Figure()
+            add_control_traces(figure, subsets[0][1], use_subplots=False)
+            apply_accessible_figure_style(figure, title=title, height=500)
+            figure.update_xaxes(title_text="Match Sequence")
+            figure.update_yaxes(title_text="Games Won - Games Lost")
+            return figure
     else:
-        add_control_traces(figure, plot_df)
-
-    if not figure.data:
-        return None
-    apply_accessible_figure_style(figure, title=title, height=500)
-    figure.update_xaxes(title_text="Match Sequence")
-    figure.update_yaxes(title_text="Games Diff")
-    return figure
+        figure = go.Figure()
+        add_control_traces(figure, plot_df, use_subplots=False)
+        if not figure.data:
+            return None
+        apply_accessible_figure_style(figure, title=title, height=500)
+        figure.update_xaxes(title_text="Match Sequence")
+        figure.update_yaxes(title_text="Games Won - Games Lost")
+        return figure
+    return None
 
 
 def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str) -> go.Figure | None:
@@ -783,42 +890,63 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
 
     figure = make_subplots(rows=1, cols=2, subplot_titles=("First Serve Funnel", "Second Serve Funnel"))
     if split_by_result and "Match Result" in chart_df.columns:
-        for result_label, color in [
-            ("W", COLORBLIND_SAFE_CHART_COLORS["accent_red"]),
-            ("L", COLORBLIND_SAFE_CHART_COLORS["accent_gray"]),
-        ]:
-            subset = chart_df[chart_df["Match Result"] == result_label]
-            if subset.empty:
-                continue
-            first_steps, second_steps = funnel_steps(subset)
-            for col_index, steps in [(1, first_steps), (2, second_steps)]:
-                percentages = percent_values(steps)
-                step_rates = step_values(steps)
+        subsets = {label: chart_df[chart_df["Match Result"] == label] for label in ["W", "L"]}
+        if not subsets["W"].empty and not subsets["L"].empty:
+            w_first, w_second = funnel_steps(subsets["W"])
+            l_first, l_second = funnel_steps(subsets["L"])
+            for col_index, steps_w, steps_l, panel_title in [
+                (1, w_first, l_first, "First Serve Funnel (W vs L)"),
+                (2, w_second, l_second, "Second Serve Funnel (W vs L)"),
+            ]:
+                pct_w = percent_values(steps_w)
+                pct_l = percent_values(steps_l)
+                labels = [label for label, _ in steps_w]
                 figure.add_trace(
                     go.Bar(
-                        x=percentages,
-                        y=[label for label, _ in steps],
+                        x=pct_w,
+                        y=labels,
                         orientation="h",
-                        name=result_label,
-                        marker_color=color,
-                        text=[
-                            f"{pct:.0%} ({int(raw):,})" if idx == 0 else f"{pct:.0%} ({step:.0%} step)"
-                            for idx, ((_, raw), pct, step) in enumerate(zip(steps, percentages, step_rates))
-                        ],
+                        name="W",
+                        marker_color=COLORBLIND_SAFE_CHART_COLORS["accent_red"],
+                        text=[f"{pct:.0%} ({int(raw):,})" for (_, raw), pct in zip(steps_w, pct_w)],
                         textposition="outside",
-                        customdata=[[raw, pct, step] for (_, raw), pct, step in zip(steps, percentages, step_rates)],
+                        customdata=[[raw, pct] for (_, raw), pct in zip(steps_w, pct_w)],
                         hovertemplate=(
                             "%{y}<br>"
-                            "Result=%{fullData.name}<br>"
+                            "Result=W<br>"
                             "Share of attempts=%{customdata[1]:.0%}<br>"
-                            "Raw count=%{customdata[0]:,.0f}<br>"
-                            "Step conversion=%{customdata[2]:.0%}<extra></extra>"
+                            "Raw count=%{customdata[0]:,.0f}<extra></extra>"
                         ),
+                        showlegend=(col_index == 1),
                     ),
                     row=1,
                     col=col_index,
                 )
-    else:
+                figure.add_trace(
+                    go.Bar(
+                        x=pct_l,
+                        y=labels,
+                        orientation="h",
+                        name="L",
+                        marker_color=COLORBLIND_SAFE_CHART_COLORS["accent_gray"],
+                        text=[f"{pct:.0%} ({int(raw):,})" for (_, raw), pct in zip(steps_l, pct_l)],
+                        textposition="outside",
+                        customdata=[[raw, pct] for (_, raw), pct in zip(steps_l, pct_l)],
+                        hovertemplate=(
+                            "%{y}<br>"
+                            "Result=L<br>"
+                            "Share of attempts=%{customdata[1]:.0%}<br>"
+                            "Raw count=%{customdata[0]:,.0f}<extra></extra>"
+                        ),
+                        showlegend=(col_index == 1),
+                    ),
+                    row=1,
+                    col=col_index,
+                )
+                figure.layout.annotations[col_index - 1].update(text=panel_title)
+        else:
+            split_by_result = False
+    if not split_by_result or "Match Result" not in chart_df.columns:
         first_steps, second_steps = funnel_steps(chart_df)
         for col_index, steps, color in [
             (1, first_steps, COLORBLIND_SAFE_CHART_COLORS["accent_red"]),
@@ -852,7 +980,9 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
 
     if not figure.data:
         return None
-    figure.update_xaxes(range=[0, 1.05], tickformat=".0%")
+    figure.update_xaxes(range=[0, 1.05], tickformat=".0%", title_text="% of Attempts")
+    figure.update_yaxes(categoryorder="array", categoryarray=["1st Won", "1st In", "1st Attempts"], row=1, col=1)
+    figure.update_yaxes(categoryorder="array", categoryarray=["2nd Won", "2nd In", "2nd Attempts"], row=1, col=2)
     apply_accessible_figure_style(figure, title=title, height=500)
     figure.update_layout(barmode="group", legend_title="Result")
     return figure
@@ -943,7 +1073,13 @@ def build_rally_profile_chart(chart_df: pd.DataFrame, split_by_result: bool, tit
         max_abs = max(float(abs(diff.values).max()), 0.01)
         text = [
             [
-                f"W={int(wins.iat[i, j])}<br>L={int(losses.iat[i, j])}<br>Total={int(match_counts.iat[i, j])}"
+                (
+                    f"W matches={int(wins.iat[i, j])} ({float(win_share.iat[i, j]):.0%} of all filtered)<br>"
+                    f"L matches={int(losses.iat[i, j])} ({float(loss_share.iat[i, j]):.0%} of all filtered)<br>"
+                    f"win rate in profile="
+                    f"{((float(wins.iat[i, j]) / float(match_counts.iat[i, j])) if float(match_counts.iat[i, j]) > 0 else 0.0):.0%} "
+                    f"(n={int(match_counts.iat[i, j])})"
+                )
                 for j in range(len(labels))
             ]
             for i in range(len(labels))
@@ -971,14 +1107,14 @@ def build_rally_profile_chart(chart_df: pd.DataFrame, split_by_result: bool, tit
         return build_rate_heatmap(
             diff,
             title,
-            "Short Rally Share Tier",
-            "Long Rally Share Tier",
+            "Short Rally Share Tier (<=4 shots share)",
+            "Long Rally Share Tier (>=9 shots share)",
             -max_abs,
             max_abs,
             COLORBLIND_SAFE_DIVERGING_SCALE,
             text,
             hover,
-            "W share of all filtered matches - L share of all filtered matches",
+            "W match share - L match share",
         )
 
     win_rate = (
@@ -1045,7 +1181,11 @@ def build_set_share_heatmap(chart_df: pd.DataFrame, split_by_result: bool, title
         max_abs = max(float(abs(diff.values).max()), 0.01)
         text = [
             [
-                f"W={int(wins.iat[i, j])}<br>L={int(losses.iat[i, j])}<br>Total={int(all_sets.iat[i, j])}"
+                (
+                    f"win sets={int(wins.iat[i, j])} ({float(win_share.iat[i, j]):.0%} of all filtered)<br>"
+                    f"loss sets={int(losses.iat[i, j])} ({float(loss_share.iat[i, j]):.0%} of all filtered)<br>"
+                    f"total sets in cell={int(all_sets.iat[i, j])}"
+                )
                 for j in range(len(labels))
             ]
             for i in range(len(labels))
@@ -1485,12 +1625,13 @@ with tabs[3]:
             if not serve_trend_fig:
                 continue
             rendered_chart = True
-            add_benchmark_lines(
-                serve_trend_fig,
-                selected_metrics,
-                benchmark_df,
-                selected_baseline_levels,
-            )
+            if not split_charts:
+                add_benchmark_lines(
+                    serve_trend_fig,
+                    selected_metrics,
+                    benchmark_df,
+                    selected_baseline_levels,
+                )
             st.markdown(f"**{season_label}**")
             st.plotly_chart(
                 serve_trend_fig,
@@ -1512,12 +1653,13 @@ with tabs[3]:
             f"Serve Statistics Trend by Date ({current_scope})",
         )
         if serve_trend_fig:
-            add_benchmark_lines(
-                serve_trend_fig,
-                selected_metrics,
-                benchmark_df,
-                selected_baseline_levels,
-            )
+            if not split_charts:
+                add_benchmark_lines(
+                    serve_trend_fig,
+                    selected_metrics,
+                    benchmark_df,
+                    selected_baseline_levels,
+                )
             st.plotly_chart(
                 serve_trend_fig,
                 width="stretch",
@@ -1532,7 +1674,12 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader(f"Games Diff Control: {current_scope}")
-    games_diff_fig = build_games_diff_chart(filtered_df, split_charts, f"Games Diff Control ({current_scope})")
+    games_diff_title = (
+        f"Games Differential Control Chart Split by Result ({current_scope})"
+        if split_charts
+        else f"Games Differential Control ({current_scope})"
+    )
+    games_diff_fig = build_games_diff_chart(filtered_df, split_charts, games_diff_title)
     if games_diff_fig:
         st.plotly_chart(
             games_diff_fig,
@@ -1544,7 +1691,12 @@ with tabs[4]:
 
 with tabs[5]:
     st.subheader(f"Serve Efficiency Funnel: {current_scope}")
-    funnel_fig = build_funnel_chart(filtered_df, split_charts, f"Serve Efficiency Funnel ({current_scope})")
+    funnel_title = (
+        f"Serve Efficiency Funnel Split by Result ({current_scope})"
+        if split_charts
+        else f"Serve Efficiency Funnel ({current_scope})"
+    )
+    funnel_fig = build_funnel_chart(filtered_df, split_charts, funnel_title)
     if funnel_fig:
         st.plotly_chart(
             funnel_fig,
@@ -1556,7 +1708,12 @@ with tabs[5]:
 
 with tabs[6]:
     st.subheader(f"Rally Length Wins: {current_scope}")
-    rally_profile_fig = build_rally_profile_chart(filtered_df, split_charts, f"Rally Length Wins ({current_scope})")
+    rally_profile_title = (
+        f"Rally Profile vs Match Wins (split W/L) ({current_scope})"
+        if split_charts
+        else f"Rally Profile vs Match Wins (win rate by bin) ({current_scope})"
+    )
+    rally_profile_fig = build_rally_profile_chart(filtered_df, split_charts, rally_profile_title)
     if rally_profile_fig:
         st.plotly_chart(
             rally_profile_fig,
@@ -1568,7 +1725,12 @@ with tabs[6]:
 
 with tabs[7]:
     st.subheader(f"Rally Bins: {current_scope}")
-    rally_bins_fig = build_rally_bins_chart(filtered_df, split_charts, f"Rally Bins ({current_scope})")
+    rally_bins_title = (
+        f"Rally Bins Split W/L (each % = sets in cell / all currently filtered sets) ({current_scope})"
+        if split_charts
+        else f"Rally Length Bins (% of Total Sets) ({current_scope})"
+    )
+    rally_bins_fig = build_rally_bins_chart(filtered_df, split_charts, rally_bins_title)
     if rally_bins_fig:
         st.plotly_chart(
             rally_bins_fig,
@@ -1580,7 +1742,12 @@ with tabs[7]:
 
 with tabs[8]:
     st.subheader(f"Pressure Bins: {current_scope}")
-    pressure_fig = build_pressure_bins_chart(filtered_df, split_charts, f"Pressure Bins ({current_scope})")
+    pressure_title = (
+        f"Pressure Bins Split W/L (each % = sets in cell / all currently filtered sets) ({current_scope})"
+        if split_charts
+        else f"Pressure Performance Bins (% of Total Sets) ({current_scope})"
+    )
+    pressure_fig = build_pressure_bins_chart(filtered_df, split_charts, pressure_title)
     if pressure_fig:
         pressure_fig = add_pressure_benchmark_markers(
             pressure_fig,
