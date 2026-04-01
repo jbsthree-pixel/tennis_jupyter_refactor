@@ -41,6 +41,7 @@ from tennis_jupyter.shared import safe_ratio  # noqa: E402
 
 
 BENCHMARK_LEVEL_COLUMNS = {
+    "NC State Avg": "NC State Avg",
     "Tour Avg": "Tour Avg",
     "Top 10 Avg": "Top 10 Avg",
 }
@@ -373,6 +374,51 @@ def aggregate_benchmark_metrics(chart_df: pd.DataFrame) -> dict[str, float]:
     return values
 
 
+def with_nc_state_benchmark(
+    benchmark_df: pd.DataFrame,
+    team_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Append a derived NC State baseline column using the full local summary dataset."""
+    team_values = aggregate_benchmark_metrics(team_df)
+    if not team_values:
+        return benchmark_df.copy()
+
+    if benchmark_df.empty:
+        return pd.DataFrame(
+            {
+                "Metric": list(team_values.keys()),
+                "NC State Avg": list(team_values.values()),
+            }
+        )
+
+    benchmark_with_team = benchmark_df.copy()
+    if "Metric" not in benchmark_with_team.columns:
+        return benchmark_with_team
+
+    benchmark_with_team["Metric"] = benchmark_with_team["Metric"].fillna("").astype(str).str.strip()
+    benchmark_with_team["NC State Avg"] = benchmark_with_team["Metric"].map(team_values)
+    missing_metrics = [
+        metric_name
+        for metric_name in team_values
+        if metric_name not in set(benchmark_with_team["Metric"].tolist())
+    ]
+    if missing_metrics:
+        benchmark_with_team = pd.concat(
+            [
+                benchmark_with_team,
+                pd.DataFrame(
+                    {
+                        "Metric": missing_metrics,
+                        "NC State Avg": [team_values[metric_name] for metric_name in missing_metrics],
+                    }
+                ),
+            ],
+            ignore_index=True,
+            sort=False,
+        )
+    return benchmark_with_team
+
+
 def build_benchmark_snapshot(
     chart_df: pd.DataFrame,
     benchmark_df: pd.DataFrame,
@@ -421,6 +467,7 @@ def add_benchmark_lines(
         if spec["app_label"]
     }
     line_styles = {
+        "NC State Avg": {"dash": "solid", "color": COLORBLIND_SAFE_CHART_COLORS["accent_red"]},
         "Tour Avg": {"dash": "dot", "color": COLORBLIND_SAFE_CHART_COLORS["accent_black"]},
         "Top 10 Avg": {"dash": "dash", "color": COLORBLIND_SAFE_CHART_COLORS["accent_taupe"]},
     }
@@ -1401,6 +1448,7 @@ if benchmark_path and benchmark_path.exists():
     benchmark_df = load_benchmark_workbook(str(benchmark_path), benchmark_mtime)
 elif benchmark_path:
     st.warning(f"Tour benchmark workbook not found: {benchmark_path}")
+benchmark_df = with_nc_state_benchmark(benchmark_df, summary_df)
 
 filter_values = available_filter_values(summary_df)
 with st.sidebar:
@@ -1420,8 +1468,8 @@ with st.sidebar:
     selected_baseline_levels = st.multiselect(
         "Benchmark Lines",
         available_baseline_levels,
-        default=["Tour Avg"] if "Tour Avg" in available_baseline_levels else [],
-        help="Overlay tour reference levels from the benchmark workbook on supported charts.",
+        default=["NC State Avg"] if "NC State Avg" in available_baseline_levels else [],
+        help="Overlay benchmark reference levels, including a derived NC State team average, on supported charts.",
     )
 
 filtered_df = filter_matches(
@@ -1541,7 +1589,7 @@ with tabs[2]:
                 for column in benchmark_snapshot_df.columns
                 if column != "Metric"
             }
-            st.caption("Filtered aggregate compared with selected tour baselines.")
+            st.caption("Filtered aggregate compared with selected benchmark baselines.")
             st.dataframe(
                 style_banded_rows(benchmark_snapshot_df, formatters=benchmark_formatters),
                 width="stretch",
