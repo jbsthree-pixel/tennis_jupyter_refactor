@@ -1540,6 +1540,7 @@ def build_win_loss_chart(chart_df: pd.DataFrame, title: str) -> go.Figure | None
             mode="lines+markers",
             name="Wins",
             line={"color": COLORBLIND_SAFE_CHART_COLORS["accent_red"]},
+            marker={"symbol": "triangle-up", "size": 11},
         ),
         secondary_y=False,
     )
@@ -1550,6 +1551,7 @@ def build_win_loss_chart(chart_df: pd.DataFrame, title: str) -> go.Figure | None
             mode="lines+markers",
             name="Losses",
             line={"color": COLORBLIND_SAFE_CHART_COLORS["accent_gray"]},
+            marker={"symbol": "x", "size": 11},
         ),
         secondary_y=False,
     )
@@ -1560,10 +1562,20 @@ def build_win_loss_chart(chart_df: pd.DataFrame, title: str) -> go.Figure | None
             mode="lines+markers",
             name="Win Rate",
             line={"color": COLORBLIND_SAFE_CHART_COLORS["accent_black"]},
+            marker={"symbol": "star", "size": 12},
         ),
         secondary_y=True,
     )
     apply_accessible_figure_style(figure, title=title, height=420)
+    figure.update_layout(
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "center",
+            "x": 0.5,
+        }
+    )
     figure.update_yaxes(title_text="Matches", secondary_y=False)
     figure.update_yaxes(title_text="Win Rate", tickformat=".0%", range=[0, 1], secondary_y=True)
     return figure
