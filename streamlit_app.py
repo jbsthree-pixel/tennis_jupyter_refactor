@@ -950,6 +950,22 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
             previous = value
         return step_rates
 
+    def apply_funnel_legend_layout(figure: go.Figure) -> None:
+        for annotation in figure.layout.annotations:
+            if getattr(annotation, "y", None) is not None and annotation.y > 0.9:
+                annotation.y = 1.08
+        figure.update_layout(
+            legend={
+                "orientation": "h",
+                "yanchor": "bottom",
+                "y": 1.01,
+                "xanchor": "center",
+                "x": 0.5,
+                "title": {"text": ""},
+            },
+            margin={"t": 150},
+        )
+
     figure = make_subplots(rows=1, cols=2, subplot_titles=("First Serve Funnel", "Second Serve Funnel"))
     if split_by_result and "Match Result" in chart_df.columns:
         subsets = {label: chart_df[chart_df["Match Result"] == label] for label in ["W", "L"]}
@@ -1047,6 +1063,7 @@ def build_funnel_chart(chart_df: pd.DataFrame, split_by_result: bool, title: str
     figure.update_yaxes(categoryorder="array", categoryarray=["2nd Won", "2nd In", "2nd Attempts"], row=1, col=2)
     apply_accessible_figure_style(figure, title=title, height=500)
     figure.update_layout(barmode="group", legend_title="Result")
+    apply_funnel_legend_layout(figure)
     return figure
 
 
@@ -1134,6 +1151,22 @@ def build_funnel_comparison_chart(
             col=col,
         )
 
+    def apply_funnel_legend_layout(figure: go.Figure) -> None:
+        for annotation in figure.layout.annotations:
+            if getattr(annotation, "y", None) is not None and annotation.y > 0.9:
+                annotation.y = 1.08
+        figure.update_layout(
+            legend={
+                "orientation": "h",
+                "yanchor": "bottom",
+                "y": 1.01,
+                "xanchor": "center",
+                "x": 0.5,
+                "title": {"text": ""},
+            },
+            margin={"t": 150},
+        )
+
     if split_by_result and "Match Result" in plot_df.columns:
         result_labels = [
             label
@@ -1194,6 +1227,7 @@ def build_funnel_comparison_chart(
                 )
             apply_accessible_figure_style(figure, title=title, height=420 * len(result_labels))
             figure.update_layout(barmode="group", legend_title="Player")
+            apply_funnel_legend_layout(figure)
             return figure
 
     figure = make_subplots(rows=1, cols=2, subplot_titles=("First Serve Funnel", "Second Serve Funnel"))
@@ -1212,6 +1246,7 @@ def build_funnel_comparison_chart(
     figure.update_yaxes(categoryorder="array", categoryarray=["2nd Won", "2nd In", "2nd Attempts"], row=1, col=2)
     apply_accessible_figure_style(figure, title=title, height=500)
     figure.update_layout(barmode="group", legend_title="Player")
+    apply_funnel_legend_layout(figure)
     return figure
 
 
