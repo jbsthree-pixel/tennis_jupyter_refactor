@@ -26,7 +26,6 @@ from tennis_jupyter.analytics import (  # noqa: E402
     build_game_level_summary,
     build_player_comparison_summary,
     build_pivot_summary,
-    build_raw_data_dictionary,
     build_serve_return_match_stats,
     filter_matches,
     load_source_review,
@@ -2505,7 +2504,6 @@ tabs = st.tabs(
         "Score-State Performance",
         "Serve / Return Score-State Rates",
         "Source Row Edits",
-        "Raw Data Dictionary",
     ]
 )
 
@@ -3478,8 +3476,3 @@ with tabs[11]:
         st.cache_data.clear()
         st.success(f"Saved changes to {source_path.name} and rebuilt the summary ({len(updated_summary):,} rows).")
         st.rerun()
-
-with tabs[12]:
-    st.subheader("Raw Data Dictionary")
-    dictionary_df = build_raw_data_dictionary(filtered_df if not filtered_df.empty else summary_df)
-    st.dataframe(style_banded_rows(dictionary_df), width="stretch")
