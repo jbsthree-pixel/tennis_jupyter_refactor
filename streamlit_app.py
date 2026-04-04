@@ -2371,21 +2371,9 @@ st.caption("Cross-platform local browser app for Windows and macOS.")
 
 default_csv = PROJECT_ROOT / "data" / "input" / "StatsReport_TeamNames.csv"
 default_benchmark_xlsx = PROJECT_ROOT / "data" / "input" / "Tour Data 2025.xlsx"
-with st.sidebar:
-    st.header("Data")
-    input_csv = st.text_input("Source CSV", value=str(default_csv), disabled=True)
-    name_map = st.text_input("Name Map XLSX (optional)", value="", disabled=True)
-    benchmark_xlsx = st.text_input(
-        "Tour Benchmark XLSX (optional)",
-        value=str(default_benchmark_xlsx) if default_benchmark_xlsx.exists() else "",
-        disabled=True,
-    )
-    if st.button("Reload Data"):
-        st.cache_data.clear()
-
-source_path = Path(input_csv)
-name_map_path = Path(name_map) if name_map.strip() else None
-benchmark_path = Path(benchmark_xlsx) if benchmark_xlsx.strip() else None
+source_path = default_csv
+name_map_path = None
+benchmark_path = default_benchmark_xlsx if default_benchmark_xlsx.exists() else None
 
 if not source_path.exists():
     st.error(f"Missing source CSV: {source_path}")
