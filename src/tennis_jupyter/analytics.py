@@ -7,7 +7,8 @@ from pathlib import Path
 import pandas as pd
 
 from .constants import MONTH_ORDER, RAW_FIELD_FORMULAS
-from .pipeline import build_match_summary
+from .pipeline import add_rawpoints_columns, build_match_summary, validate_required_columns
+from .pipeline.summary import _clean_name, _load_name_mapping
 from .shared import safe_ratio
 
 
@@ -457,6 +458,178 @@ def build_raw_data_dictionary(df: pd.DataFrame) -> pd.DataFrame:
             ],
         }
     )
+
+
+def build_game_level_summary(
+    input_csv: Path | str,
+    name_map_xlsx: Path | str | None = None,
+) -> pd.DataFrame:
+    """Collapse point rows into one row per game for game-level modeling."""
+    input_path = Path(input_csv)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Missing input file: {input_path}")
+
+    df = pd.read_csv(input_path, low_memory=False)
+    required_base_columns = [
+        "matchId",
+        "gameId",
+        "player",
+        "opp",
+        "date",
+        "set",
+        "game",
+        "gameWonBy",
+        "server",
+        "returner",
+        "gamesWon",
+        "oppGamesWon",
+        "setsWon",
+        "oppSetsWon",
+        "tiebreaker",
+    ]
+    for column in required_base_columns:
+        if column not in df.columns:
+            raise ValueError(f"Missing required column: {column}")
+
+    mapping = _load_name_mapping(Path(name_map_xlsx) if name_map_xlsx else None)
+    df["player"] = df["player"].apply(lambda value: _clean_name(value, mapping))
+    df["opp"] = df["opp"].apply(lambda value: _clean_name(value, mapping))
+
+    if "opp_team" not in df.columns:
+        df["opp_team"] = ""
+    df["opp_team"] = df["opp_team"].fillna("").astype(str).str.strip()
+    if "gamePoint" not in df.columns:
+        df["gamePoint"] = False
+
+    required_indicators = [
+        "first_serve_attempt",
+        "first_serve_in",
+        "first_serve_won",
+        "second_serve_attempt",
+        "second_serve_in",
+        "second_serve_won",
+        "double_fault",
+        "ace",
+        "first_serve_not_returned",
+        "first_serve_return_opportunity",
+        "first_serve_return_in",
+        "first_serve_return_won",
+        "second_serve_return_opportunity",
+        "second_serve_return_in",
+        "second_serve_return_won",
+        "opp_double_fault",
+        "break_point_faced",
+        "break_point_saved",
+        "break_point_total",
+        "break_point_won",
+        "short_rally_won",
+        "medium_rally_won",
+        "long_rally_won",
+    ]
+    missing_indicators = [column for column in required_indicators if column not in df.columns]
+    if missing_indicators:
+        validate_required_columns(df)
+        df = add_rawpoints_columns(df)
+
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["Match Date"] = df["date"].dt.date
+    df["Match Year"] = df["date"].dt.year
+    df["Match Month Name"] = df["date"].dt.strftime("%B")
+
+    df["is_service_point"] = (df["server"] == 0).astype("int64")
+    df["is_return_point"] = (df["returner"] == 0).astype("int64")
+    df["won_game"] = (df["gameWonBy"] == 0).astype("int64")
+    df["game_point_faced"] = (
+        df["gamePoint"].fillna(False).eq(True) & df["is_service_point"].eq(1)
+    ).astype("int64")
+    df["game_point_earned"] = (
+        df["gamePoint"].fillna(False).eq(True) & df["is_return_point"].eq(1)
+    ).astype("int64")
+
+    group_columns = [
+        "matchId",
+        "gameId",
+        "player",
+        "opp",
+        "opp_team",
+        "Match Date",
+        "Match Year",
+        "Match Month Name",
+        "set",
+        "game",
+        "tiebreaker",
+    ]
+    sum_columns = required_indicators + [
+        "is_service_point",
+        "is_return_point",
+        "game_point_faced",
+        "game_point_earned",
+    ]
+    aggregation = {column: "sum" for column in sum_columns}
+    aggregation.update(
+        {
+            "won_game": "max",
+            "gamesWon": "min",
+            "oppGamesWon": "min",
+            "setsWon": "min",
+            "oppSetsWon": "min",
+        }
+    )
+
+    grouped = df.groupby(group_columns, dropna=False, as_index=False).agg(aggregation)
+    grouped["is_service_game"] = (grouped["is_service_point"] > 0).astype("int64")
+    grouped["is_return_game"] = (grouped["is_return_point"] > 0).astype("int64")
+    grouped["held_serve"] = (grouped["won_game"] & grouped["is_service_game"]).astype("int64")
+    grouped["broke_serve"] = (grouped["won_game"] & grouped["is_return_game"]).astype("int64")
+    grouped["score_margin_games"] = grouped["gamesWon"] - grouped["oppGamesWon"]
+    grouped["score_margin_sets"] = grouped["setsWon"] - grouped["oppSetsWon"]
+    grouped["pressure_diff"] = grouped["break_point_total"] - grouped["break_point_faced"]
+    grouped["rally_wins_total"] = (
+        grouped["short_rally_won"] + grouped["medium_rally_won"] + grouped["long_rally_won"]
+    )
+
+    grouped["1st Serve In %"] = safe_ratio(grouped["first_serve_in"], grouped["first_serve_attempt"])
+    grouped["1st Serve Won %"] = safe_ratio(grouped["first_serve_won"], grouped["first_serve_in"])
+    grouped["2nd Serve Won %"] = safe_ratio(grouped["second_serve_won"], grouped["second_serve_attempt"])
+    grouped["Ace %"] = safe_ratio(grouped["ace"], grouped["first_serve_attempt"])
+    grouped["DF %"] = safe_ratio(grouped["double_fault"], grouped["second_serve_attempt"])
+    grouped["1st Serve Not Returned %"] = safe_ratio(
+        grouped["first_serve_not_returned"],
+        grouped["first_serve_in"],
+    )
+    grouped["1st Return In %"] = safe_ratio(
+        grouped["first_serve_return_in"],
+        grouped["first_serve_return_opportunity"],
+    )
+    grouped["1st Return Won %"] = safe_ratio(
+        grouped["first_serve_return_won"],
+        grouped["first_serve_return_opportunity"],
+    )
+    grouped["2nd Return In %"] = safe_ratio(
+        grouped["second_serve_return_in"],
+        grouped["second_serve_return_opportunity"],
+    )
+    grouped["2nd Return Won %"] = safe_ratio(
+        grouped["second_serve_return_won"],
+        grouped["second_serve_return_opportunity"],
+    )
+    grouped["Short Rally Win Share"] = safe_ratio(
+        grouped["short_rally_won"],
+        grouped["rally_wins_total"],
+    )
+    grouped["Medium Rally Win Share"] = safe_ratio(
+        grouped["medium_rally_won"],
+        grouped["rally_wins_total"],
+    )
+    grouped["Long Rally Win Share"] = safe_ratio(
+        grouped["long_rally_won"],
+        grouped["rally_wins_total"],
+    )
+
+    numeric_columns = grouped.select_dtypes(include="number").columns
+    grouped[numeric_columns] = grouped[numeric_columns].fillna(0)
+    return with_season_columns(grouped.reset_index(drop=True))
 
 
 def load_source_review(source_csv_path: str | Path) -> tuple[pd.DataFrame, dict[int, list[int]], pd.DataFrame]:
