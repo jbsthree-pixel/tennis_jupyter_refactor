@@ -2496,7 +2496,6 @@ tabs = st.tabs(
         "Raw Matches",
         "Serve / Return Match Stats",
         "Serve Stats Trend",
-        "Games Diff Control",
         "Serve Efficiency Funnel",
         "Rally Length Wins",
         "Rally Bins",
@@ -2749,35 +2748,6 @@ with tabs[3]:
             st.info("No serve trend data is available for the current filters.")
 
 with tabs[4]:
-    st.subheader(f"Games Diff Control: {current_scope}")
-    games_diff_title = (
-        f"Games Differential Control Chart Split by Result ({current_scope})"
-        if split_charts
-        else f"Games Differential Control ({current_scope})"
-    )
-    if len(selected_players) > 1:
-        rendered_chart = render_player_chart_grid(
-            filtered_df,
-            selected_players,
-            "games_diff_compare",
-            lambda frame, title: build_games_diff_chart(frame, split_charts, title),
-            lambda player_name: f"{player_name} Games Differential Control",
-            base_chart_key_parts,
-        )
-        if not rendered_chart:
-            st.info("No games-diff comparison data is available for the current filters.")
-    else:
-        games_diff_fig = build_games_diff_chart(filtered_df, split_charts, games_diff_title)
-        if games_diff_fig:
-            st.plotly_chart(
-                games_diff_fig,
-                width="stretch",
-                key=chart_key("games_diff", *base_chart_key_parts),
-            )
-        else:
-            st.info("No games-diff data is available for the current filters.")
-
-with tabs[5]:
     st.subheader(f"Serve Efficiency Funnel: {current_scope}")
     funnel_title = (
         f"Serve Efficiency Funnel Split by Result ({current_scope})"
@@ -2810,7 +2780,7 @@ with tabs[5]:
         else:
             st.info("No serve funnel data is available for the current filters.")
 
-with tabs[6]:
+with tabs[5]:
     st.subheader(f"Rally Length Wins: {current_scope}")
     rally_profile_title = (
         f"Rally Profile vs Match Wins (split W/L) ({current_scope})"
@@ -2839,7 +2809,7 @@ with tabs[6]:
         else:
             st.info("No rally profile data is available for the current filters.")
 
-with tabs[7]:
+with tabs[6]:
     st.subheader(f"Rally Bins: {current_scope}")
     rally_bins_title = (
         f"Rally Bins Split W/L (each % = sets in cell / all currently filtered sets) ({current_scope})"
@@ -2868,7 +2838,7 @@ with tabs[7]:
         else:
             st.info("No rally-bin data is available for the current filters.")
 
-with tabs[8]:
+with tabs[7]:
     st.subheader(f"Pressure Bins: {current_scope}")
     pressure_title = (
         f"Pressure Bins Split W/L (each % = sets in cell / all currently filtered sets) ({current_scope})"
@@ -2932,7 +2902,7 @@ with tabs[8]:
         else:
             st.info("No pressure-bin data is available for the current filters.")
 
-with tabs[9]:
+with tabs[8]:
     st.subheader(f"Score-State Performance: {current_scope}")
     score_state_views = {
         "Service Games": {
@@ -3138,7 +3108,7 @@ with tabs[9]:
             width="stretch",
         )
 
-with tabs[10]:
+with tabs[9]:
     st.subheader(f"Serve / Return Score-State Rates: {current_scope}")
     rate_score_state_views = {
         "1st Serve In %": {
@@ -3449,7 +3419,7 @@ with tabs[10]:
             width="stretch",
         )
 
-with tabs[11]:
+with tabs[10]:
     st.subheader("Source Row Edits")
     review_df, review_index_map, source_raw_df = load_source_review_cached(str(source_path), csv_mtime)
     st.caption("This tab is temporarily visible but disabled.")
