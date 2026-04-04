@@ -7,10 +7,14 @@ import io
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.preprocessing import StandardScaler
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_PATH = PROJECT_ROOT / "src"
@@ -19,6 +23,7 @@ if str(SRC_PATH) not in sys.path:
 
 from tennis_jupyter.analytics import (  # noqa: E402
     available_filter_values,
+    build_game_level_summary,
     build_player_comparison_summary,
     build_pivot_summary,
     build_raw_data_dictionary,
@@ -234,7 +239,7 @@ st.markdown(
             border-bottom-color: var(--accent-red);
         }}
 
-        button[data-baseweb="tab"]:nth-of-type(10) {{
+        button[data-baseweb="tab"]:nth-of-type(12) {{
             cursor: not-allowed;
             opacity: 0.5;
             pointer-events: none;
@@ -255,6 +260,18 @@ def load_summary_cached(
     """Cache summary rebuilds until the source files change."""
     _ = csv_mtime, name_map_mtime
     return load_match_summary(input_csv=input_csv, name_map_xlsx=name_map_xlsx)
+
+
+@st.cache_data(show_spinner=False)
+def load_game_summary_cached(
+    input_csv: str,
+    name_map_xlsx: str | None,
+    csv_mtime: float,
+    name_map_mtime: float | None,
+) -> pd.DataFrame:
+    """Cache game-level rebuilds until the source files change."""
+    _ = csv_mtime, name_map_mtime
+    return build_game_level_summary(input_csv=input_csv, name_map_xlsx=name_map_xlsx)
 
 
 @st.cache_data(show_spinner=False)
@@ -353,6 +370,610 @@ def chart_key(name: str, *parts: object) -> str:
         else:
             serialized.append(str(part))
     return "::".join(serialized)
+
+
+def classify_feature_strength(coefficient: float) -> str:
+    """Bucket standardized coefficients into a simple usefulness label."""
+    magnitude = abs(float(coefficient))
+    if magnitude >= 0.5:
+        return "High"
+    if magnitude >= 0.2:
+        return "Medium"
+    return "Low"
+
+
+def format_plain_language_feature_name(feature: str) -> str:
+    """Translate technical feature labels into plainer language."""
+    replacements = {
+        "1st Serve In %": "First-serve rate",
+        "1st Serve Won %": "First-serve points won",
+        "2nd Serve Won %": "Second-serve points won",
+        "Ace %": "Ace rate",
+        "DF %": "Double-fault rate",
+        "1st Serve Not Returned %": "Unreturned first serves",
+        "break_point_faced": "Break points faced",
+        "break_point_saved": "Break points saved",
+        "game_point_faced": "Game points faced",
+        "score_margin_games": "Game lead/deficit",
+        "1st Return In %": "First-serve returns in play",
+        "1st Return Won %": "First-serve return points won",
+        "2nd Return In %": "Second-serve returns in play",
+        "2nd Return Won %": "Second-serve return points won",
+        "opp_double_fault": "Opponent double faults",
+        "break_point_total": "Break points earned",
+        "break_point_won": "Break points converted",
+        "game_point_earned": "Game points earned",
+        "pressure_diff": "Break-point edge",
+    }
+    return replacements.get(feature, feature.replace("_", " ").title())
+
+
+def build_logistic_importance_chart(coef_df: pd.DataFrame, title: str) -> go.Figure | None:
+    """Render standardized logistic coefficients as an importance bar chart."""
+    if coef_df.empty:
+        return None
+
+    chart_df = coef_df.sort_values("Coefficient").copy()
+    colors = [
+        (
+            COLORBLIND_SAFE_CHART_COLORS["accent_red"]
+            if bucket == "Helped"
+            else COLORBLIND_SAFE_CHART_COLORS["accent_gray"]
+            if bucket == "Hurt"
+            else COLORBLIND_SAFE_CHART_COLORS["accent_taupe"]
+        )
+        for bucket in chart_df["Bucket"]
+    ]
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=chart_df["Coefficient"],
+            y=chart_df["Plain Feature"],
+            orientation="h",
+            marker_color=colors,
+            text=chart_df["Bucket"],
+            customdata=chart_df[["Direction", "Included Games", "Strength"]].to_numpy(),
+            hovertemplate=(
+                "%{y}<br>"
+                "Bucket: %{text}<br>"
+                "Direction: %{customdata[0]}<br>"
+                "Effect size: %{x:.3f}<br>"
+                "Games Used: %{customdata[1]:,.0f}<br>"
+                "Signal: %{customdata[2]}<extra></extra>"
+            ),
+        )
+    )
+    apply_accessible_figure_style(figure, title=title, height=460)
+    figure.update_layout(
+        xaxis_title="Left = tended to hurt, Right = tended to help",
+        yaxis_title="Match factor",
+        margin=dict(l=40, r=20, t=60, b=40),
+    )
+    figure.add_vline(x=0, line_dash="dash", line_color=COLORBLIND_SAFE_CHART_COLORS["accent_black"])
+    return figure
+
+
+def summarize_model_takeaways(coef_df: pd.DataFrame) -> tuple[str | None, str | None]:
+    """Return one plain-language helper and one plain-language risk."""
+    if coef_df.empty:
+        return None, None
+
+    positive_df = coef_df[coef_df["Coefficient"] > 0].sort_values("Coefficient", ascending=False)
+    negative_df = coef_df[coef_df["Coefficient"] < 0].sort_values("Coefficient", ascending=True)
+
+    helper = None
+    risk = None
+    if not positive_df.empty:
+        helper_row = positive_df.iloc[0]
+        helper = (
+            f"Biggest helper in this sample: {helper_row['Plain Feature']} "
+            f"showed a {helper_row['Strength'].lower()} positive signal."
+        )
+    if not negative_df.empty:
+        risk_row = negative_df.iloc[0]
+        risk = (
+            f"Biggest warning sign in this sample: {risk_row['Plain Feature']} "
+            f"showed a {risk_row['Strength'].lower()} negative signal."
+        )
+    return helper, risk
+
+
+def categorize_feature_signal(coefficient: float, strength: str) -> str:
+    """Group each factor into helped, hurt, or didn't matter much."""
+    if strength == "Low":
+        return "Didn't Matter Much"
+    if coefficient > 0:
+        return "Helped"
+    if coefficient < 0:
+        return "Hurt"
+    return "Didn't Matter Much"
+
+
+def bucket_game_score_state(score_margin_games: pd.Series) -> pd.Series:
+    """Convert game lead/deficit into a plain-language score-state bucket."""
+    numeric = pd.to_numeric(score_margin_games, errors="coerce").fillna(0)
+    return numeric.apply(
+        lambda value: (
+            "Trailing by 2+"
+            if value <= -2
+            else "Trailing by 1"
+            if value == -1
+            else "Level"
+            if value == 0
+            else "Leading by 1"
+            if value == 1
+            else "Leading by 2+"
+        )
+    )
+
+
+def bucket_set_score_state(score_margin_sets: pd.Series) -> pd.Series:
+    """Convert set lead/deficit into a plain-language set-state bucket."""
+    numeric = pd.to_numeric(score_margin_sets, errors="coerce").fillna(0)
+    return numeric.apply(
+        lambda value: (
+            "Trailing in sets"
+            if value < 0
+            else "Level in sets"
+            if value == 0
+            else "Leading in sets"
+        )
+    )
+
+
+def build_score_state_summary(
+    df: pd.DataFrame,
+    *,
+    state_column: str,
+    target_column: str,
+    success_label: str,
+    state_order: list[str] | None = None,
+) -> pd.DataFrame:
+    """Summarize hold/break rates by one score-state dimension."""
+    if df.empty or state_column not in df.columns or target_column not in df.columns:
+        return pd.DataFrame()
+
+    summary_df = df[[state_column, target_column]].copy()
+    summary_df[target_column] = pd.to_numeric(summary_df[target_column], errors="coerce").fillna(0)
+    grouped = (
+        summary_df.groupby(state_column, dropna=False)
+        .agg(
+            Games=(target_column, "size"),
+            Successes=(target_column, "sum"),
+        )
+        .reset_index()
+        .rename(columns={state_column: "Score State"})
+    )
+    grouped[success_label] = safe_ratio(grouped["Successes"], grouped["Games"])
+    total_games = float(grouped["Games"].sum())
+    grouped["Share of Games"] = grouped["Games"] / total_games if total_games else 0.0
+
+    if state_order:
+        grouped["_order"] = grouped["Score State"].map({label: idx for idx, label in enumerate(state_order)}).fillna(len(state_order))
+        grouped = grouped.sort_values(["_order", "Score State"]).drop(columns="_order")
+    else:
+        grouped = grouped.sort_values("Games", ascending=False)
+
+    return grouped.reset_index(drop=True)
+
+
+def build_score_state_ratio_summary(
+    df: pd.DataFrame,
+    *,
+    state_column: str,
+    numerator_column: str,
+    denominator_column: str,
+    rate_label: str,
+    state_order: list[str] | None = None,
+) -> pd.DataFrame:
+    """Summarize weighted rate performance by one score-state dimension."""
+    required_columns = {state_column, numerator_column, denominator_column}
+    if df.empty or not required_columns.issubset(df.columns):
+        return pd.DataFrame()
+
+    summary_df = df[[state_column, numerator_column, denominator_column]].copy()
+    summary_df[numerator_column] = pd.to_numeric(summary_df[numerator_column], errors="coerce").fillna(0)
+    summary_df[denominator_column] = pd.to_numeric(summary_df[denominator_column], errors="coerce").fillna(0)
+    grouped = (
+        summary_df.groupby(state_column, dropna=False)
+        .agg(
+            Games=(state_column, "size"),
+            Numerator=(numerator_column, "sum"),
+            Denominator=(denominator_column, "sum"),
+        )
+        .reset_index()
+        .rename(columns={state_column: "Score State"})
+    )
+    grouped[rate_label] = safe_ratio(grouped["Numerator"], grouped["Denominator"])
+    total_games = float(grouped["Games"].sum())
+    grouped["Share of Games"] = grouped["Games"] / total_games if total_games else 0.0
+
+    if state_order:
+        grouped["_order"] = grouped["Score State"].map({label: idx for idx, label in enumerate(state_order)}).fillna(len(state_order))
+        grouped = grouped.sort_values(["_order", "Score State"]).drop(columns="_order")
+    else:
+        grouped = grouped.sort_values("Games", ascending=False)
+
+    return grouped.reset_index(drop=True)
+
+
+def build_score_state_bar_chart(
+    summary_df: pd.DataFrame,
+    *,
+    title: str,
+    rate_column: str,
+    overall_rate: float,
+) -> go.Figure | None:
+    """Plot a single score-state rate chart with an overall baseline."""
+    if summary_df.empty or rate_column not in summary_df.columns:
+        return None
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=summary_df["Score State"],
+            y=summary_df[rate_column],
+            marker_color=COLORBLIND_SAFE_CHART_COLORS["accent_red"],
+            customdata=summary_df[["Games", "Successes", "Share of Games"]].to_numpy(),
+            hovertemplate=(
+                "%{x}<br>"
+                f"{rate_column}: "
+                "%{y:.1%}<br>"
+                "Games: %{customdata[0]:,.0f}<br>"
+                "Successful games: %{customdata[1]:,.0f}<br>"
+                "Share of sample: %{customdata[2]:.1%}<extra></extra>"
+            ),
+        )
+    )
+    apply_accessible_figure_style(figure, title=title, height=420)
+    figure.update_layout(
+        margin=dict(l=40, r=20, t=60, b=40),
+        xaxis_title="Score state",
+        yaxis_title=rate_column,
+        showlegend=False,
+    )
+    figure.update_yaxes(tickformat=".0%", range=[0, 1])
+    figure.add_hline(
+        y=overall_rate,
+        line_dash="dash",
+        line_color=COLORBLIND_SAFE_CHART_COLORS["accent_black"],
+        annotation_text=f"Overall: {overall_rate:.1%}",
+        annotation_position="top left",
+    )
+    return figure
+
+
+def build_score_state_ratio_bar_chart(
+    summary_df: pd.DataFrame,
+    *,
+    title: str,
+    rate_column: str,
+    overall_rate: float,
+    numerator_label: str,
+    denominator_label: str,
+) -> go.Figure | None:
+    """Plot a score-state rate chart with weighted numerator/denominator details."""
+    required_columns = {"Score State", "Games", "Numerator", "Denominator", "Share of Games", rate_column}
+    if summary_df.empty or not required_columns.issubset(summary_df.columns):
+        return None
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=summary_df["Score State"],
+            y=summary_df[rate_column],
+            marker_color=COLORBLIND_SAFE_CHART_COLORS["accent_red"],
+            customdata=summary_df[["Games", "Numerator", "Denominator", "Share of Games"]].to_numpy(),
+            hovertemplate=(
+                "%{x}<br>"
+                f"{rate_column}: "
+                "%{y:.1%}<br>"
+                "Games: %{customdata[0]:,.0f}<br>"
+                f"{numerator_label}: "
+                "%{customdata[1]:,.0f}<br>"
+                f"{denominator_label}: "
+                "%{customdata[2]:,.0f}<br>"
+                "Share of sample: %{customdata[3]:.1%}<extra></extra>"
+            ),
+        )
+    )
+    apply_accessible_figure_style(figure, title=title, height=420)
+    figure.update_layout(
+        margin=dict(l=40, r=20, t=60, b=40),
+        xaxis_title="Score state",
+        yaxis_title=rate_column,
+        showlegend=False,
+    )
+    figure.update_yaxes(tickformat=".0%", range=[0, 1])
+    figure.add_hline(
+        y=overall_rate,
+        line_dash="dash",
+        line_color=COLORBLIND_SAFE_CHART_COLORS["accent_black"],
+        annotation_text=f"Overall: {overall_rate:.1%}",
+        annotation_position="top left",
+    )
+    return figure
+
+
+def format_action_change(delta: float, unit: str) -> str:
+    """Describe an intervention in plain English."""
+    if unit == "pct_points":
+        points = abs(delta) * 100
+        direction = "rises" if delta > 0 else "drops"
+        return f"{direction} by {points:.0f} percentage points"
+    if unit == "count":
+        amount = abs(delta)
+        direction = "rises" if delta > 0 else "drops"
+        return f"{direction} by {amount:.0f}"
+    amount = abs(delta)
+    direction = "rises" if delta > 0 else "drops"
+    return f"{direction} by {amount:.2f}"
+
+
+def build_real_world_effects(
+    df: pd.DataFrame,
+    target_column: str,
+    action_specs: list[dict[str, object]],
+) -> pd.DataFrame:
+    """Build observed effect curves from real games only."""
+    if df.empty or target_column not in df.columns:
+        return pd.DataFrame()
+
+    base_rate = float(pd.to_numeric(df[target_column], errors="coerce").fillna(0).mean())
+    rows: list[dict[str, object]] = []
+    for spec in action_specs:
+        feature = str(spec["feature"])
+        if feature not in df.columns:
+            continue
+        feature_values = pd.to_numeric(df[feature], errors="coerce")
+        if feature_values.notna().sum() == 0:
+            continue
+        baseline_value = float(feature_values.mean())
+        direction = -1 if float(spec.get("delta", 0.01)) < 0 else 1
+        for step in range(1, 6):
+            delta = direction * (step / 100.0)
+            threshold = baseline_value + delta
+            if spec.get("bounds"):
+                lower, upper = spec["bounds"]
+                threshold = min(max(threshold, lower), upper)
+            if delta > 0:
+                comparison_mask = feature_values >= threshold
+            else:
+                comparison_mask = feature_values <= threshold
+            comparison_df = df.loc[comparison_mask].copy()
+            if len(comparison_df) < 25:
+                continue
+            observed_rate = float(pd.to_numeric(comparison_df[target_column], errors="coerce").fillna(0).mean())
+            rows.append(
+                {
+                    "Feature": str(spec["headline"]),
+                    "Step": step,
+                    "Direction": "Higher" if delta > 0 else "Lower",
+                    "Base Rate": base_rate,
+                    "Observed Rate": observed_rate,
+                    "Rate Change": observed_rate - base_rate,
+                    "Sample Size": int(len(comparison_df)),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+def build_real_world_effect_plot(
+    effects_df: pd.DataFrame,
+    title: str,
+    rate_label: str,
+) -> go.Figure | None:
+    """Plot observed rate change for 1-5 point changes using real games only."""
+    if effects_df.empty:
+        return None
+
+    figure = go.Figure()
+    palette = [
+        COLORBLIND_SAFE_CHART_COLORS["accent_red"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_gray"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_rose"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_taupe"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_black"],
+    ]
+    for index, feature_name in enumerate(effects_df["Feature"].drop_duplicates()):
+        feature_df = effects_df[effects_df["Feature"] == feature_name].sort_values("Step")
+        figure.add_trace(
+            go.Scatter(
+                x=feature_df["Step"],
+                y=feature_df["Rate Change"],
+                mode="lines+markers",
+                name=feature_name,
+                line=dict(color=palette[index % len(palette)], width=3),
+                marker=dict(size=8),
+                customdata=feature_df[["Observed Rate", "Sample Size", "Direction"]].to_numpy(),
+                hovertemplate=(
+                    "%{fullData.name}<br>"
+                    "%{customdata[2]} by %{x} percentage point(s)<br>"
+                    f"{rate_label}: "
+                    "%{customdata[0]:.1%}<br>"
+                    "Difference vs overall: %{y:+.1%}<br>"
+                    "Real games used: %{customdata[1]:,.0f}<extra></extra>"
+                ),
+            )
+        )
+
+    apply_accessible_figure_style(figure, title=title, height=440)
+    figure.update_layout(
+        xaxis_title="Change Size (percentage points)",
+        yaxis_title=f"Difference vs overall {rate_label.lower()}",
+        margin=dict(l=40, r=20, t=60, b=40),
+        legend_title="Factor",
+    )
+    figure.update_xaxes(tickmode="linear", dtick=1)
+    figure.update_yaxes(tickformat="+.0%")
+    figure.add_hline(y=0, line_dash="dash", line_color=COLORBLIND_SAFE_CHART_COLORS["accent_black"])
+    return figure
+
+
+def chronological_train_test_split(
+    model_df: pd.DataFrame,
+    *,
+    train_fraction: float = 0.70,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Timestamp | None]:
+    """Split a model dataframe by whole dates using the oldest ~train_fraction for training."""
+    if model_df.empty or "Match Date" not in model_df.columns:
+        return pd.DataFrame(), pd.DataFrame(), None
+
+    dated_df = model_df.copy()
+    dated_df["Match Date"] = pd.to_datetime(dated_df["Match Date"], errors="coerce")
+    dated_df = dated_df[dated_df["Match Date"].notna()].sort_values(
+        ["Match Date", "matchId", "gameId"],
+        na_position="last",
+    )
+    if dated_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), None
+
+    by_date = (
+        dated_df.groupby("Match Date", dropna=False)
+        .size()
+        .reset_index(name="games")
+        .sort_values("Match Date")
+        .reset_index(drop=True)
+    )
+    by_date["cum_games"] = by_date["games"].cumsum()
+    target_games = max(1, int(len(dated_df) * train_fraction))
+    cutoff_row = by_date[by_date["cum_games"] >= target_games].iloc[0]
+    cutoff_date = pd.Timestamp(cutoff_row["Match Date"])
+
+    train_df = dated_df[dated_df["Match Date"] < cutoff_date].copy()
+    test_df = dated_df[dated_df["Match Date"] >= cutoff_date].copy()
+
+    if train_df.empty or test_df.empty:
+        split_index = max(1, min(len(dated_df) - 1, target_games))
+        train_df = dated_df.iloc[:split_index].copy()
+        test_df = dated_df.iloc[split_index:].copy()
+        cutoff_date = (
+            pd.Timestamp(test_df["Match Date"].min())
+            if not test_df.empty and "Match Date" in test_df.columns
+            else None
+        )
+
+    return train_df.reset_index(drop=True), test_df.reset_index(drop=True), cutoff_date
+
+
+def fit_regularized_logistic_model(
+    df: pd.DataFrame,
+    target_column: str,
+    feature_columns: list[str],
+) -> dict[str, object] | None:
+    """Fit a regularized binary logistic model and return metrics plus coefficients."""
+    if df.empty:
+        return None
+
+    needed_columns = [target_column, *feature_columns]
+    metadata_columns = [
+        column
+        for column in ["Match Date", "matchId", "gameId"]
+        if column in df.columns
+    ]
+    model_df = df[needed_columns + metadata_columns].copy()
+    for column in feature_columns:
+        model_df[column] = pd.to_numeric(model_df[column], errors="coerce").fillna(0.0)
+    model_df[target_column] = pd.to_numeric(model_df[target_column], errors="coerce").fillna(0).astype("int64")
+
+    usable_features = [
+        column
+        for column in feature_columns
+        if model_df[column].nunique(dropna=False) > 1
+    ]
+    if not usable_features:
+        return None
+
+    X = model_df[usable_features]
+    y = model_df[target_column]
+    class_counts = y.value_counts()
+    if len(class_counts) < 2 or class_counts.min() < 2:
+        return None
+
+    train_df, test_df, cutoff_date = chronological_train_test_split(model_df)
+    if train_df.empty or test_df.empty:
+        return None
+
+    X_train = train_df[usable_features]
+    y_train = train_df[target_column]
+    X_test = test_df[usable_features]
+    y_test = test_df[target_column]
+    train_class_counts = y_train.value_counts()
+    test_class_counts = y_test.value_counts()
+    if (
+        len(train_class_counts) < 2
+        or len(test_class_counts) < 2
+        or train_class_counts.min() < 2
+        or test_class_counts.min() < 2
+    ):
+        return None
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    model = LogisticRegression(
+        l1_ratio=1.0,
+        C=0.7,
+        solver="saga",
+        max_iter=1000,
+        random_state=42,
+    )
+    model.fit(X_train_scaled, y_train)
+
+    probabilities = model.predict_proba(X_test_scaled)[:, 1]
+    predictions = (probabilities >= 0.5).astype("int64")
+
+    coef_df = pd.DataFrame(
+        {
+            "Feature": usable_features,
+            "Coefficient": model.coef_[0],
+        }
+    )
+    coef_df["Abs Coefficient"] = coef_df["Coefficient"].abs()
+    coef_df["Strength"] = coef_df["Coefficient"].apply(classify_feature_strength)
+    coef_df["Plain Feature"] = coef_df["Feature"].apply(format_plain_language_feature_name)
+    coef_df["Direction"] = coef_df["Coefficient"].apply(
+        lambda value: "Helped more often" if value > 0 else "Hurt more often" if value < 0 else "Little signal"
+    )
+    coef_df["Bucket"] = coef_df.apply(
+        lambda row: categorize_feature_signal(float(row["Coefficient"]), str(row["Strength"])),
+        axis=1,
+    )
+    coef_df["Included Games"] = len(model_df)
+    coef_df = coef_df.sort_values("Abs Coefficient", ascending=False).reset_index(drop=True)
+
+    auc = roc_auc_score(y_test, probabilities) if y_test.nunique() > 1 else float("nan")
+    accuracy = accuracy_score(y_test, predictions)
+
+    return {
+        "model": model,
+        "scaler": scaler,
+        "coef_df": coef_df,
+        "features": usable_features,
+        "feature_means": X.mean().to_dict(),
+        "accuracy": accuracy,
+        "roc_auc": auc,
+        "positive_rate": float(y.mean()),
+        "rows_used": int(len(model_df)),
+        "train_rows": int(len(train_df)),
+        "holdout_rows": int(len(test_df)),
+        "train_end_date": (
+            pd.to_datetime(train_df["Match Date"], errors="coerce").max().date()
+            if "Match Date" in train_df.columns and not train_df.empty
+            else None
+        ),
+        "test_start_date": (
+            pd.to_datetime(test_df["Match Date"], errors="coerce").min().date()
+            if "Match Date" in test_df.columns and not test_df.empty
+            else None
+        ),
+        "cutoff_date": cutoff_date.date() if cutoff_date is not None else None,
+        "evaluation_scope": "Chronological Holdout",
+    }
 
 
 def render_player_chart_grid(
@@ -467,8 +1088,23 @@ def with_nc_state_benchmark(
             ],
             ignore_index=True,
             sort=False,
-        )
+    )
     return benchmark_with_team
+
+
+def season_scoped_team_df(
+    summary_df: pd.DataFrame,
+    season_label: str,
+) -> pd.DataFrame:
+    """Return the all-player dataset used to derive the NC State benchmark for a season scope."""
+    if summary_df.empty:
+        return summary_df.copy()
+
+    if not season_label or season_label == "All":
+        return summary_df.copy()
+
+    season_df = with_season_columns(summary_df)
+    return season_df[season_df["_Season Label"] == season_label].reset_index(drop=True)
 
 
 def build_benchmark_snapshot(
@@ -1759,13 +2395,18 @@ if not source_path.exists():
 csv_mtime = source_path.stat().st_mtime
 name_map_mtime = name_map_path.stat().st_mtime if name_map_path and name_map_path.exists() else None
 summary_df = load_summary_cached(str(source_path), str(name_map_path) if name_map_path else None, csv_mtime, name_map_mtime)
+game_df = load_game_summary_cached(
+    str(source_path),
+    str(name_map_path) if name_map_path else None,
+    csv_mtime,
+    name_map_mtime,
+)
 benchmark_df = pd.DataFrame()
 if benchmark_path and benchmark_path.exists():
     benchmark_mtime = benchmark_path.stat().st_mtime
     benchmark_df = load_benchmark_workbook(str(benchmark_path), benchmark_mtime)
 elif benchmark_path:
     st.warning(f"Tour benchmark workbook not found: {benchmark_path}")
-benchmark_df = with_nc_state_benchmark(benchmark_df, summary_df)
 
 filter_values = available_filter_values(summary_df)
 with st.sidebar:
@@ -1782,6 +2423,10 @@ with st.sidebar:
     selected_opp_team = st.selectbox("Opp Team", filter_values["opp_teams"])
     selected_season = st.selectbox("Season", filter_values["seasons"])
     split_charts = st.checkbox("Split Charts W/L", value=False)
+    benchmark_df = with_nc_state_benchmark(
+        benchmark_df,
+        season_scoped_team_df(summary_df, selected_season),
+    )
     st.header("Baselines")
     available_baseline_levels = [
         level
@@ -1797,6 +2442,14 @@ with st.sidebar:
 
 filtered_df = filter_matches(
     summary_df,
+    player=selected_players,
+    year=None if selected_year == "All" else int(selected_year),
+    month_name=selected_month,
+    opp_team=selected_opp_team,
+    season_label=selected_season,
+)
+filtered_game_df = filter_matches(
+    game_df,
     player=selected_players,
     year=None if selected_year == "All" else int(selected_year),
     month_name=selected_month,
@@ -1849,6 +2502,8 @@ tabs = st.tabs(
         "Rally Length Wins",
         "Rally Bins",
         "Pressure Bins",
+        "Score-State Performance",
+        "Serve / Return Score-State Rates",
         "Source Row Edits",
         "Raw Data Dictionary",
     ]
@@ -2280,6 +2935,523 @@ with tabs[8]:
             st.info("No pressure-bin data is available for the current filters.")
 
 with tabs[9]:
+    st.subheader(f"Score-State Performance: {current_scope}")
+    score_state_views = {
+        "Service Games": {
+            "subset_column": "is_service_game",
+            "target_column": "held_serve",
+            "rate_label": "Hold Rate",
+            "success_label": "Holds",
+            "pressure_column": "game_point_faced",
+            "pressure_hit_label": "Faced game point",
+            "pressure_miss_label": "No game point faced",
+            "caption": "How service-game outcomes changed based on the scoreboard and whether the game got tight.",
+        },
+        "Return Games": {
+            "subset_column": "is_return_game",
+            "target_column": "broke_serve",
+            "rate_label": "Break Rate",
+            "success_label": "Breaks",
+            "pressure_column": "game_point_earned",
+            "pressure_hit_label": "Reached game point",
+            "pressure_miss_label": "No game point reached",
+            "caption": "How return-game outcomes changed based on the scoreboard and whether you created a game-point chance.",
+        },
+    }
+    selected_score_state_view = st.selectbox(
+        "Score-state lens",
+        list(score_state_views.keys()),
+        key="score_state_view",
+    )
+    score_state_config = score_state_views[selected_score_state_view]
+    score_state_game_df = filtered_game_df[
+        filtered_game_df[score_state_config["subset_column"]] == 1
+    ].copy()
+    st.caption(score_state_config["caption"])
+
+    if score_state_game_df.empty:
+        st.info("No game-level rows are available for the current filters.")
+    else:
+        score_state_game_df["Game Score State"] = bucket_game_score_state(score_state_game_df["score_margin_games"])
+        score_state_game_df["Set Score State"] = bucket_set_score_state(score_state_game_df["score_margin_sets"])
+        score_state_game_df["Pressure State"] = np.where(
+            pd.to_numeric(score_state_game_df[score_state_config["pressure_column"]], errors="coerce").fillna(0) > 0,
+            score_state_config["pressure_hit_label"],
+            score_state_config["pressure_miss_label"],
+        )
+        score_state_game_df["Game Type"] = np.where(
+            score_state_game_df["tiebreaker"].fillna(False).astype(bool),
+            "Tiebreak",
+            "Standard game",
+        )
+
+        overall_rate = float(
+            pd.to_numeric(score_state_game_df[score_state_config["target_column"]], errors="coerce").fillna(0).mean()
+        )
+        total_games = int(len(score_state_game_df))
+        total_successes = int(
+            pd.to_numeric(score_state_game_df[score_state_config["target_column"]], errors="coerce").fillna(0).sum()
+        )
+        pressure_games = int(
+            (pd.to_numeric(score_state_game_df[score_state_config["pressure_column"]], errors="coerce").fillna(0) > 0).sum()
+        )
+
+        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+        metric_col1.metric("Games", f"{total_games:,}")
+        metric_col2.metric(score_state_config["success_label"], f"{total_successes:,}")
+        metric_col3.metric(score_state_config["rate_label"], f"{overall_rate:.1%}")
+        metric_col4.metric("Pressure Games", f"{pressure_games:,}")
+
+        game_state_summary_df = build_score_state_summary(
+            score_state_game_df,
+            state_column="Game Score State",
+            target_column=score_state_config["target_column"],
+            success_label=score_state_config["rate_label"],
+            state_order=["Trailing by 2+", "Trailing by 1", "Level", "Leading by 1", "Leading by 2+"],
+        )
+        set_state_summary_df = build_score_state_summary(
+            score_state_game_df,
+            state_column="Set Score State",
+            target_column=score_state_config["target_column"],
+            success_label=score_state_config["rate_label"],
+            state_order=["Trailing in sets", "Level in sets", "Leading in sets"],
+        )
+        pressure_summary_df = build_score_state_summary(
+            score_state_game_df,
+            state_column="Pressure State",
+            target_column=score_state_config["target_column"],
+            success_label=score_state_config["rate_label"],
+            state_order=[
+                score_state_config["pressure_miss_label"],
+                score_state_config["pressure_hit_label"],
+            ],
+        )
+        game_type_summary_df = build_score_state_summary(
+            score_state_game_df,
+            state_column="Game Type",
+            target_column=score_state_config["target_column"],
+            success_label=score_state_config["rate_label"],
+            state_order=["Standard game", "Tiebreak"],
+        )
+
+        chart_col1, chart_col2 = st.columns(2)
+        game_state_fig = build_score_state_bar_chart(
+            game_state_summary_df,
+            title=f"{selected_score_state_view}: {score_state_config['rate_label']} by Game Score State",
+            rate_column=score_state_config["rate_label"],
+            overall_rate=overall_rate,
+        )
+        set_state_fig = build_score_state_bar_chart(
+            set_state_summary_df,
+            title=f"{selected_score_state_view}: {score_state_config['rate_label']} by Set Score State",
+            rate_column=score_state_config["rate_label"],
+            overall_rate=overall_rate,
+        )
+        if game_state_fig:
+            chart_col1.plotly_chart(
+                game_state_fig,
+                width="stretch",
+                key=chart_key("score_state_game_margin", *base_chart_key_parts, selected_score_state_view),
+            )
+        if set_state_fig:
+            chart_col2.plotly_chart(
+                set_state_fig,
+                width="stretch",
+                key=chart_key("score_state_set_margin", *base_chart_key_parts, selected_score_state_view),
+            )
+
+        detail_col1, detail_col2 = st.columns(2)
+        with detail_col1:
+            st.markdown("**Tight-Game Split**")
+            st.dataframe(
+                style_banded_rows(
+                    pressure_summary_df,
+                    formatters={
+                        score_state_config["rate_label"]: "{:.1%}",
+                        "Share of Games": "{:.1%}",
+                    },
+                ),
+                width="stretch",
+            )
+        with detail_col2:
+            st.markdown("**Tiebreak vs Standard**")
+            st.dataframe(
+                style_banded_rows(
+                    game_type_summary_df,
+                    formatters={
+                        score_state_config["rate_label"]: "{:.1%}",
+                        "Share of Games": "{:.1%}",
+                    },
+                ),
+                width="stretch",
+            )
+
+        st.markdown("**Full Score-State Table**")
+        combined_score_state_df = pd.concat(
+            [
+                game_state_summary_df.assign(Section="Game Score State"),
+                set_state_summary_df.assign(Section="Set Score State"),
+                pressure_summary_df.assign(Section="Tight-Game Split"),
+                game_type_summary_df.assign(Section="Game Type"),
+            ],
+            ignore_index=True,
+            sort=False,
+        )[
+            ["Section", "Score State", "Games", "Successes", score_state_config["rate_label"], "Share of Games"]
+        ]
+        st.dataframe(
+            style_banded_rows(
+                combined_score_state_df,
+                formatters={
+                    score_state_config["rate_label"]: "{:.1%}",
+                    "Share of Games": "{:.1%}",
+                },
+            ),
+            width="stretch",
+        )
+
+        score_state_download_df = score_state_game_df[
+            [
+                column
+                for column in [
+                    "matchId",
+                    "gameId",
+                    "player",
+                    "opp",
+                    "Match Date",
+                    "set",
+                    "game",
+                    "score_margin_games",
+                    "score_margin_sets",
+                    "Game Score State",
+                    "Set Score State",
+                    "Pressure State",
+                    "Game Type",
+                    score_state_config["target_column"],
+                ]
+                if column in score_state_game_df.columns
+            ]
+        ]
+        st.download_button(
+            "Download Score-State Games CSV",
+            data=to_csv_bytes(score_state_download_df),
+            file_name=f"{selected_score_state_view.lower().replace(' ', '_')}_score_state_games.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+with tabs[10]:
+    st.subheader(f"Serve / Return Score-State Rates: {current_scope}")
+    rate_score_state_views = {
+        "1st Serve In %": {
+            "subset_column": "is_service_game",
+            "numerator_column": "first_serve_in",
+            "denominator_column": "first_serve_attempt",
+            "numerator_label": "1st serves in",
+            "denominator_label": "1st serve attempts",
+            "pressure_column": "game_point_faced",
+            "pressure_hit_label": "Faced game point",
+            "pressure_miss_label": "No game point faced",
+            "caption": "How first-serve rate changed by scoreboard context during service games.",
+        },
+        "1st Serve Won %": {
+            "subset_column": "is_service_game",
+            "numerator_column": "first_serve_won",
+            "denominator_column": "first_serve_in",
+            "numerator_label": "1st-serve points won",
+            "denominator_label": "1st serves in",
+            "pressure_column": "game_point_faced",
+            "pressure_hit_label": "Faced game point",
+            "pressure_miss_label": "No game point faced",
+            "caption": "How first-serve points won changed by scoreboard context during service games.",
+        },
+        "2nd Serve In %": {
+            "subset_column": "is_service_game",
+            "numerator_column": "second_serve_in",
+            "denominator_column": "second_serve_attempt",
+            "numerator_label": "2nd serves in",
+            "denominator_label": "2nd serve attempts",
+            "pressure_column": "game_point_faced",
+            "pressure_hit_label": "Faced game point",
+            "pressure_miss_label": "No game point faced",
+            "caption": "How second-serve rate changed by scoreboard context during service games.",
+        },
+        "2nd Serve Won %": {
+            "subset_column": "is_service_game",
+            "numerator_column": "second_serve_won",
+            "denominator_column": "second_serve_attempt",
+            "numerator_label": "2nd-serve points won",
+            "denominator_label": "2nd serve attempts",
+            "pressure_column": "game_point_faced",
+            "pressure_hit_label": "Faced game point",
+            "pressure_miss_label": "No game point faced",
+            "caption": "How second-serve points won changed by scoreboard context during service games.",
+        },
+        "1st Return In %": {
+            "subset_column": "is_return_game",
+            "numerator_column": "first_serve_return_in",
+            "denominator_column": "first_serve_return_opportunity",
+            "numerator_label": "1st-serve returns in play",
+            "denominator_label": "1st-serve return chances",
+            "pressure_column": "game_point_earned",
+            "pressure_hit_label": "Reached game point",
+            "pressure_miss_label": "No game point reached",
+            "caption": "How first-serve return rate changed by scoreboard context during return games.",
+        },
+        "1st Return Won %": {
+            "subset_column": "is_return_game",
+            "numerator_column": "first_serve_return_won",
+            "denominator_column": "first_serve_return_opportunity",
+            "numerator_label": "1st-serve return points won",
+            "denominator_label": "1st-serve return chances",
+            "pressure_column": "game_point_earned",
+            "pressure_hit_label": "Reached game point",
+            "pressure_miss_label": "No game point reached",
+            "caption": "How first-serve return points won changed by scoreboard context during return games.",
+        },
+        "2nd Return In %": {
+            "subset_column": "is_return_game",
+            "numerator_column": "second_serve_return_in",
+            "denominator_column": "second_serve_return_opportunity",
+            "numerator_label": "2nd-serve returns in play",
+            "denominator_label": "2nd-serve return chances",
+            "pressure_column": "game_point_earned",
+            "pressure_hit_label": "Reached game point",
+            "pressure_miss_label": "No game point reached",
+            "caption": "How second-serve return rate changed by scoreboard context during return games.",
+        },
+        "2nd Return Won %": {
+            "subset_column": "is_return_game",
+            "numerator_column": "second_serve_return_won",
+            "denominator_column": "second_serve_return_opportunity",
+            "numerator_label": "2nd-serve return points won",
+            "denominator_label": "2nd-serve return chances",
+            "pressure_column": "game_point_earned",
+            "pressure_hit_label": "Reached game point",
+            "pressure_miss_label": "No game point reached",
+            "caption": "How second-serve return points won changed by scoreboard context during return games.",
+        },
+    }
+    selected_rate_score_state_view = st.selectbox(
+        "Serve/return rate lens",
+        list(rate_score_state_views.keys()),
+        key="rate_score_state_view",
+    )
+    rate_score_state_config = rate_score_state_views[selected_rate_score_state_view]
+    rate_score_state_game_df = filtered_game_df[
+        filtered_game_df[rate_score_state_config["subset_column"]] == 1
+    ].copy()
+    st.caption(rate_score_state_config["caption"])
+
+    if rate_score_state_game_df.empty:
+        st.info("No game-level rows are available for the current filters.")
+    else:
+        numerator_display_label = rate_score_state_config["numerator_label"]
+        denominator_display_label = rate_score_state_config["denominator_label"]
+        rate_score_state_game_df["Game Score State"] = bucket_game_score_state(rate_score_state_game_df["score_margin_games"])
+        rate_score_state_game_df["Set Score State"] = bucket_set_score_state(rate_score_state_game_df["score_margin_sets"])
+        rate_score_state_game_df["Pressure State"] = np.where(
+            pd.to_numeric(rate_score_state_game_df[rate_score_state_config["pressure_column"]], errors="coerce").fillna(0) > 0,
+            rate_score_state_config["pressure_hit_label"],
+            rate_score_state_config["pressure_miss_label"],
+        )
+        rate_score_state_game_df["Game Type"] = np.where(
+            rate_score_state_game_df["tiebreaker"].fillna(False).astype(bool),
+            "Tiebreak",
+            "Standard game",
+        )
+
+        total_games = int(len(rate_score_state_game_df))
+        total_numerator = float(
+            pd.to_numeric(rate_score_state_game_df[rate_score_state_config["numerator_column"]], errors="coerce").fillna(0).sum()
+        )
+        total_denominator = float(
+            pd.to_numeric(rate_score_state_game_df[rate_score_state_config["denominator_column"]], errors="coerce").fillna(0).sum()
+        )
+        overall_rate = float(safe_ratio(pd.Series([total_numerator]), pd.Series([total_denominator])).iloc[0])
+        pressure_games = int(
+            (pd.to_numeric(rate_score_state_game_df[rate_score_state_config["pressure_column"]], errors="coerce").fillna(0) > 0).sum()
+        )
+
+        metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
+        metric_col1.metric("Games", f"{total_games:,}")
+        metric_col2.metric(numerator_display_label, f"{total_numerator:,.0f}")
+        metric_col3.metric(denominator_display_label, f"{total_denominator:,.0f}")
+        metric_col4.metric(selected_rate_score_state_view, f"{overall_rate:.1%}")
+        metric_col5.metric("Pressure Games", f"{pressure_games:,}")
+
+        game_state_summary_df = build_score_state_ratio_summary(
+            rate_score_state_game_df,
+            state_column="Game Score State",
+            numerator_column=rate_score_state_config["numerator_column"],
+            denominator_column=rate_score_state_config["denominator_column"],
+            rate_label=selected_rate_score_state_view,
+            state_order=["Trailing by 2+", "Trailing by 1", "Level", "Leading by 1", "Leading by 2+"],
+        )
+        set_state_summary_df = build_score_state_ratio_summary(
+            rate_score_state_game_df,
+            state_column="Set Score State",
+            numerator_column=rate_score_state_config["numerator_column"],
+            denominator_column=rate_score_state_config["denominator_column"],
+            rate_label=selected_rate_score_state_view,
+            state_order=["Trailing in sets", "Level in sets", "Leading in sets"],
+        )
+        pressure_summary_df = build_score_state_ratio_summary(
+            rate_score_state_game_df,
+            state_column="Pressure State",
+            numerator_column=rate_score_state_config["numerator_column"],
+            denominator_column=rate_score_state_config["denominator_column"],
+            rate_label=selected_rate_score_state_view,
+            state_order=[
+                rate_score_state_config["pressure_miss_label"],
+                rate_score_state_config["pressure_hit_label"],
+            ],
+        )
+        game_type_summary_df = build_score_state_ratio_summary(
+            rate_score_state_game_df,
+            state_column="Game Type",
+            numerator_column=rate_score_state_config["numerator_column"],
+            denominator_column=rate_score_state_config["denominator_column"],
+            rate_label=selected_rate_score_state_view,
+            state_order=["Standard game", "Tiebreak"],
+        )
+
+        chart_col1, chart_col2 = st.columns(2)
+        game_state_fig = build_score_state_ratio_bar_chart(
+            game_state_summary_df,
+            title=f"{selected_rate_score_state_view} by Game Score State",
+            rate_column=selected_rate_score_state_view,
+            overall_rate=overall_rate,
+            numerator_label=numerator_display_label,
+            denominator_label=denominator_display_label,
+        )
+        set_state_fig = build_score_state_ratio_bar_chart(
+            set_state_summary_df,
+            title=f"{selected_rate_score_state_view} by Set Score State",
+            rate_column=selected_rate_score_state_view,
+            overall_rate=overall_rate,
+            numerator_label=numerator_display_label,
+            denominator_label=denominator_display_label,
+        )
+        if game_state_fig:
+            chart_col1.plotly_chart(
+                game_state_fig,
+                width="stretch",
+                key=chart_key("rate_score_state_game_margin", *base_chart_key_parts, selected_rate_score_state_view),
+            )
+        if set_state_fig:
+            chart_col2.plotly_chart(
+                set_state_fig,
+                width="stretch",
+                key=chart_key("rate_score_state_set_margin", *base_chart_key_parts, selected_rate_score_state_view),
+            )
+
+        detail_col1, detail_col2 = st.columns(2)
+        with detail_col1:
+            st.markdown("**Tight-Game Split**")
+            st.dataframe(
+                style_banded_rows(
+                    pressure_summary_df.rename(
+                        columns={
+                            "Numerator": numerator_display_label,
+                            "Denominator": denominator_display_label,
+                        }
+                    ),
+                    formatters={
+                        selected_rate_score_state_view: "{:.1%}",
+                        "Share of Games": "{:.1%}",
+                    },
+                ),
+                width="stretch",
+            )
+        with detail_col2:
+            st.markdown("**Tiebreak vs Standard**")
+            st.dataframe(
+                style_banded_rows(
+                    game_type_summary_df.rename(
+                        columns={
+                            "Numerator": numerator_display_label,
+                            "Denominator": denominator_display_label,
+                        }
+                    ),
+                    formatters={
+                        selected_rate_score_state_view: "{:.1%}",
+                        "Share of Games": "{:.1%}",
+                    },
+                ),
+                width="stretch",
+            )
+
+        st.markdown("**Full Score-State Table**")
+        combined_rate_score_state_df = pd.concat(
+            [
+                game_state_summary_df.assign(Section="Game Score State"),
+                set_state_summary_df.assign(Section="Set Score State"),
+                pressure_summary_df.assign(Section="Tight-Game Split"),
+                game_type_summary_df.assign(Section="Game Type"),
+            ],
+            ignore_index=True,
+            sort=False,
+        ).rename(
+            columns={
+                "Numerator": numerator_display_label,
+                "Denominator": denominator_display_label,
+            }
+        )[
+            [
+                "Section",
+                "Score State",
+                "Games",
+                numerator_display_label,
+                denominator_display_label,
+                selected_rate_score_state_view,
+                "Share of Games",
+            ]
+        ]
+        st.dataframe(
+            style_banded_rows(
+                combined_rate_score_state_df,
+                formatters={
+                    selected_rate_score_state_view: "{:.1%}",
+                    "Share of Games": "{:.1%}",
+                },
+            ),
+            width="stretch",
+        )
+
+        rate_score_state_download_df = rate_score_state_game_df[
+            [
+                column
+                for column in [
+                    "matchId",
+                    "gameId",
+                    "player",
+                    "opp",
+                    "Match Date",
+                    "set",
+                    "game",
+                    "score_margin_games",
+                    "score_margin_sets",
+                    "Game Score State",
+                    "Set Score State",
+                    "Pressure State",
+                    "Game Type",
+                    rate_score_state_config["numerator_column"],
+                    rate_score_state_config["denominator_column"],
+                    selected_rate_score_state_view,
+                ]
+                if column in rate_score_state_game_df.columns
+            ]
+        ]
+        st.download_button(
+            "Download Serve/Return Score-State CSV",
+            data=to_csv_bytes(rate_score_state_download_df),
+            file_name=f"{selected_rate_score_state_view.lower().replace(' ', '_').replace('%', 'pct')}_score_state_games.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+with tabs[11]:
     st.subheader("Source Row Edits")
     review_df, review_index_map, source_raw_df = load_source_review_cached(str(source_path), csv_mtime)
     st.caption("This tab is temporarily visible but disabled.")
@@ -2307,7 +3479,7 @@ with tabs[9]:
         st.success(f"Saved changes to {source_path.name} and rebuilt the summary ({len(updated_summary):,} rows).")
         st.rerun()
 
-with tabs[10]:
+with tabs[12]:
     st.subheader("Raw Data Dictionary")
     dictionary_df = build_raw_data_dictionary(filtered_df if not filtered_df.empty else summary_df)
     st.dataframe(style_banded_rows(dictionary_df), width="stretch")
