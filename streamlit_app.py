@@ -202,6 +202,22 @@ st.markdown(
             z-index: 1;
         }}
 
+        .score-state-bullets {{
+            margin: -0.25rem 0 0.85rem 3.4rem;
+        }}
+
+        .score-state-bullets ul {{
+            margin: 0;
+            padding-left: 1.1rem;
+        }}
+
+        .score-state-bullets li {{
+            color: var(--text-strong);
+            font-size: 0.95rem;
+            line-height: 1.45;
+            margin: 0.15rem 0;
+        }}
+
         @media (max-width: 640px) {{
             .nc-state-banner {{
                 align-items: flex-start;
@@ -214,6 +230,10 @@ st.markdown(
 
             .nc-state-banner__title {{
                 font-size: 1.65rem;
+            }}
+
+            .score-state-bullets {{
+                margin-left: 1rem;
             }}
         }}
 
@@ -640,6 +660,73 @@ def build_score_state_bar_chart(
         annotation_position="top left",
     )
     return figure
+
+
+def describe_player_group(df: pd.DataFrame, player_column: str = "player") -> tuple[str, str]:
+    """Return a coaching-friendly player reference and pronoun."""
+    if df.empty or player_column not in df.columns:
+        return "the player", "they"
+
+    players = sorted(
+        {
+            str(player).strip()
+            for player in df[player_column].dropna().tolist()
+            if str(player).strip()
+        }
+    )
+    if not players:
+        return "the player", "they"
+    if len(players) == 1:
+        return players[0], "they"
+    return "these players", "they"
+
+
+def build_score_state_explainer(
+    summary_df: pd.DataFrame,
+    *,
+    rate_column: str,
+    overall_rate: float,
+    subject_label: str,
+    subject_pronoun: str,
+    context_label: str,
+    view_label: str,
+) -> str | None:
+    """Create a concise coaching note for the score-state chart."""
+    required_columns = {"Score State", "Games", rate_column}
+    if summary_df.empty or not required_columns.issubset(summary_df.columns):
+        return None
+
+    explainer_df = summary_df.copy()
+    explainer_df["_delta"] = pd.to_numeric(explainer_df[rate_column], errors="coerce").fillna(0) - float(overall_rate)
+    explainer_df = explainer_df.sort_values(["_delta", "Games"], ascending=[False, False]).reset_index(drop=True)
+
+    strongest_row = explainer_df.iloc[0]
+    weakest_row = explainer_df.sort_values(["_delta", "Games"], ascending=[True, False]).iloc[0]
+
+    strongest_delta = float(strongest_row["_delta"])
+    weakest_delta = float(weakest_row["_delta"])
+    action_label = "Hold" if view_label == "Service Games" else "Break"
+    gap = float(strongest_row[rate_column]) - float(weakest_row[rate_column])
+
+    bullets = [
+        f"- {action_label} is most likely when: {strongest_row['Score State']} ({strongest_row[rate_column]:.1%})",
+        f"- {action_label} is least likely when: {weakest_row['Score State']} ({weakest_row[rate_column]:.1%})",
+    ]
+    if abs(gap) <= 0.002:
+        bullets.append(f"- There is not much difference across score states here ({gap:.1%} separates the top and bottom rates).")
+    return "\n".join(bullets)
+
+
+def render_score_state_explainer(explainer_text: str) -> None:
+    """Render score-state bullets with a left offset that aligns to the chart area."""
+    bullets = [line[2:].strip() for line in explainer_text.splitlines() if line.strip().startswith("- ")]
+    if not bullets:
+        return
+    bullet_html = "".join(f"<li>{bullet}</li>" for bullet in bullets)
+    st.markdown(
+        f'<div class="score-state-bullets"><ul>{bullet_html}</ul></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def build_score_state_ratio_bar_chart(
@@ -2930,6 +3017,7 @@ with tabs[8]:
     else:
         score_state_game_df["Game Score State"] = bucket_game_score_state(score_state_game_df["score_margin_games"])
         score_state_game_df["Set Score State"] = bucket_set_score_state(score_state_game_df["score_margin_sets"])
+        player_group_label, player_group_pronoun = describe_player_group(score_state_game_df)
         score_state_game_df["Pressure State"] = np.where(
             pd.to_numeric(score_state_game_df[score_state_config["pressure_column"]], errors="coerce").fillna(0) > 0,
             score_state_config["pressure_hit_label"],
@@ -3009,12 +3097,36 @@ with tabs[8]:
                 width="stretch",
                 key=chart_key("score_state_game_margin", *base_chart_key_parts, selected_score_state_view),
             )
+            game_state_explainer = build_score_state_explainer(
+                game_state_summary_df,
+                rate_column=score_state_config["rate_label"],
+                overall_rate=overall_rate,
+                subject_label=player_group_label,
+                subject_pronoun=player_group_pronoun,
+                context_label=f"the {selected_score_state_view.lower()} chart shows that",
+                view_label=selected_score_state_view,
+            )
+            if game_state_explainer:
+                with chart_col1:
+                    render_score_state_explainer(game_state_explainer)
         if set_state_fig:
             chart_col2.plotly_chart(
                 set_state_fig,
                 width="stretch",
                 key=chart_key("score_state_set_margin", *base_chart_key_parts, selected_score_state_view),
             )
+            set_state_explainer = build_score_state_explainer(
+                set_state_summary_df,
+                rate_column=score_state_config["rate_label"],
+                overall_rate=overall_rate,
+                subject_label=player_group_label,
+                subject_pronoun=player_group_pronoun,
+                context_label="the set-score chart shows that",
+                view_label=selected_score_state_view,
+            )
+            if set_state_explainer:
+                with chart_col2:
+                    render_score_state_explainer(set_state_explainer)
 
         detail_col1, detail_col2 = st.columns(2)
         with detail_col1:
