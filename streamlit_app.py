@@ -2447,7 +2447,7 @@ st.markdown(
 )
 st.caption("Cross-platform local browser app for Windows and macOS.")
 
-default_csv = PROJECT_ROOT / "data" / "input" / "StatsReport_TeamNames.csv"
+default_csv = PROJECT_ROOT / "data" / "input" / "team_singles_stats.csv"
 default_benchmark_xlsx = PROJECT_ROOT / "data" / "input" / "Tour Data 2025.xlsx"
 source_path = default_csv
 name_map_path = None
