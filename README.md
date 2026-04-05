@@ -84,8 +84,6 @@ The default dataset is already referenced from:
 Important hosted-app note:
 
 - downloads work normally on Streamlit Community Cloud
-- the `Source Row Edits` tab writes changes back to the local CSV file on disk
-- on hosted Streamlit environments, filesystem writes are not durable application storage, so those edits should be treated as temporary unless you add persistent storage or a sync workflow
 
 ## Run From The Command Line
 

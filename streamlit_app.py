@@ -28,8 +28,6 @@ from tennis_jupyter.analytics import (  # noqa: E402
     build_pivot_summary,
     build_serve_return_match_stats,
     filter_matches,
-    load_source_review,
-    save_source_review_changes,
     summarize_key_insights,
     with_season_columns,
 )
@@ -291,13 +289,6 @@ def load_game_summary_cached(
     """Cache game-level rebuilds until the source files change."""
     _ = csv_mtime, name_map_mtime
     return build_game_level_summary(input_csv=input_csv, name_map_xlsx=name_map_xlsx)
-
-
-@st.cache_data(show_spinner=False)
-def load_source_review_cached(source_csv: str, csv_mtime: float):
-    """Cache grouped source rows for editing until the source file changes."""
-    _ = csv_mtime
-    return load_source_review(source_csv)
 
 
 @st.cache_data(show_spinner=False)
@@ -2577,7 +2568,6 @@ tabs = st.tabs(
         "Pressure Bins",
         "Score-State Performance",
         "Serve / Return Score-State Rates",
-        "Source Row Edits",
     ]
 )
 
@@ -3519,30 +3509,3 @@ with tabs[9]:
             width="stretch",
         )
 
-with tabs[10]:
-    st.subheader("Source Row Edits")
-    review_df, review_index_map, source_raw_df = load_source_review_cached(str(source_path), csv_mtime)
-    st.caption("This tab is temporarily visible but disabled.")
-    edited_df = st.data_editor(
-        review_df,
-        width="stretch",
-        hide_index=True,
-        num_rows="fixed",
-        disabled=True,
-        column_config={
-            "_review_id": st.column_config.NumberColumn("Review ID", disabled=True),
-            "rows_affected": st.column_config.NumberColumn("Rows Affected", disabled=True),
-            "Delete": st.column_config.CheckboxColumn("Delete"),
-        },
-    )
-    st.caption("Edit grouped source rows directly here. Use the Delete column to remove grouped rows from the source CSV.")
-    if st.button("Save Source CSV Changes", type="primary", disabled=True):
-        updated_summary = save_source_review_changes(
-            edited_df,
-            review_index_map,
-            source_raw_df,
-            str(source_path),
-        )
-        st.cache_data.clear()
-        st.success(f"Saved changes to {source_path.name} and rebuilt the summary ({len(updated_summary):,} rows).")
-        st.rerun()
