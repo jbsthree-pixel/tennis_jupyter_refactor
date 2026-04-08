@@ -43,11 +43,12 @@ from tennis_jupyter.reporting import write_excel_report  # noqa: E402
 from tennis_jupyter.shared import safe_ratio  # noqa: E402
 
 
-BENCHMARK_LEVEL_COLUMNS = {
-    "NC State Avg": "NC State Avg",
-    "Tour Avg": "Tour Avg",
-    "Top 10 Avg": "Top 10 Avg",
-}
+BENCHMARK_LEVEL_DISPLAY_ORDER = [
+    "NC State Avg",
+    "All Opponent Avg",
+    "Tour Avg",
+    "Top 10 Avg",
+]
 
 BENCHMARK_SPECS = [
     {
@@ -105,6 +106,49 @@ BENCHMARK_SPECS = [
         "table_column": None,
         "numerator": "break_point_saved",
         "denominator": "break_point_faced",
+    },
+]
+
+OPPONENT_BENCHMARK_SPECS = [
+    {
+        "workbook_metric": "1st Serve In",
+        "numerator": "first_serve_return_opportunity",
+        "denominator": "return_point",
+    },
+    {
+        "workbook_metric": "1st Serve Points Won",
+        "numerator": ("first_serve_return_opportunity", "first_serve_return_won"),
+        "denominator": "first_serve_return_opportunity",
+    },
+    {
+        "workbook_metric": "2nd Serve Points Won",
+        "numerator": ("second_serve_return_opportunity", "second_serve_return_won"),
+        "denominator": ("second_serve_return_opportunity", "opp_double_fault"),
+    },
+    {
+        "workbook_metric": "1st Serves Unreturned",
+        "numerator": ("first_serve_return_opportunity", "first_serve_return_in"),
+        "denominator": "first_serve_return_opportunity",
+    },
+    {
+        "workbook_metric": "1st Serve Return Points Won",
+        "numerator": ("first_serve_in", "first_serve_won"),
+        "denominator": "first_serve_in",
+    },
+    {
+        "workbook_metric": "2nd Serve Return Points Won",
+        "numerator": ("second_serve_in", "second_serve_won"),
+        "denominator": "second_serve_in",
+    },
+    {
+        "workbook_metric": "Break Points Won",
+        "numerator": ("break_point_faced", "break_point_saved"),
+        "denominator": "break_point_faced",
+    },
+    {
+        "workbook_metric": "Break Points Saved",
+        "numerator": ("break_point_total", "break_point_won"),
+        "denominator": "break_point_total",
     },
 ]
 
@@ -1095,15 +1139,21 @@ def benchmark_lookup(benchmark_df: pd.DataFrame) -> dict[str, dict[str, float]]:
     if benchmark_df.empty:
         return lookup
 
+    level_columns = [column for column in benchmark_df.columns if str(column) != "Metric"]
     for _, row in benchmark_df.iterrows():
         metric_name = str(row.get("Metric", "")).strip()
         if not metric_name:
             continue
-        lookup[metric_name] = {
-            level_name: float(row[column])
-            for level_name, column in BENCHMARK_LEVEL_COLUMNS.items()
-            if column in benchmark_df.columns and pd.notna(row.get(column))
-        }
+        metric_lookup: dict[str, float] = {}
+        for column in level_columns:
+            value = row.get(column)
+            if pd.isna(value):
+                continue
+            try:
+                metric_lookup[str(column)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        lookup[metric_name] = metric_lookup
     return lookup
 
 
@@ -1124,49 +1174,142 @@ def aggregate_benchmark_metrics(chart_df: pd.DataFrame) -> dict[str, float]:
     return values
 
 
-def with_nc_state_benchmark(
+def _summed_series_value(
+    totals: pd.DataFrame,
+    column_or_difference: str | tuple[str, str],
+) -> float:
+    """Sum a numeric column or the positive difference between two columns."""
+    if isinstance(column_or_difference, tuple):
+        left, right = column_or_difference
+        if left not in totals.columns or right not in totals.columns:
+            return 0.0
+        left_values = pd.to_numeric(totals[left], errors="coerce").fillna(0)
+        right_values = pd.to_numeric(totals[right], errors="coerce").fillna(0)
+        return float((left_values - right_values).sum())
+
+    if column_or_difference not in totals.columns:
+        return 0.0
+    return float(pd.to_numeric(totals[column_or_difference], errors="coerce").fillna(0).sum())
+
+
+def aggregate_opponent_benchmark_metrics(chart_df: pd.DataFrame) -> dict[str, float]:
+    """Aggregate the opponent side of the filtered match data into workbook-comparable rates."""
+    values: dict[str, float] = {}
+    if chart_df.empty:
+        return values
+
+    totals = chart_df.copy()
+    for spec in OPPONENT_BENCHMARK_SPECS:
+        numerator = _summed_series_value(totals, spec["numerator"])
+        denominator = _summed_series_value(totals, spec["denominator"])
+        values[spec["workbook_metric"]] = float(numerator / denominator) if denominator else 0.0
+
+    return values
+
+
+def with_derived_benchmark_column(
     benchmark_df: pd.DataFrame,
-    team_df: pd.DataFrame,
+    column_name: str,
+    metric_values: dict[str, float],
 ) -> pd.DataFrame:
-    """Append a derived NC State baseline column using the full local summary dataset."""
-    team_values = aggregate_benchmark_metrics(team_df)
-    if not team_values:
+    """Append a derived baseline column aligned to workbook metrics."""
+    if not metric_values:
         return benchmark_df.copy()
 
     if benchmark_df.empty:
         return pd.DataFrame(
             {
-                "Metric": list(team_values.keys()),
-                "NC State Avg": list(team_values.values()),
+                "Metric": list(metric_values.keys()),
+                column_name: list(metric_values.values()),
             }
         )
 
-    benchmark_with_team = benchmark_df.copy()
-    if "Metric" not in benchmark_with_team.columns:
-        return benchmark_with_team
+    benchmark_with_column = benchmark_df.copy()
+    if "Metric" not in benchmark_with_column.columns:
+        return benchmark_with_column
 
-    benchmark_with_team["Metric"] = benchmark_with_team["Metric"].fillna("").astype(str).str.strip()
-    benchmark_with_team["NC State Avg"] = benchmark_with_team["Metric"].map(team_values)
+    benchmark_with_column["Metric"] = benchmark_with_column["Metric"].fillna("").astype(str).str.strip()
+    benchmark_with_column[column_name] = benchmark_with_column["Metric"].map(metric_values)
     missing_metrics = [
         metric_name
-        for metric_name in team_values
-        if metric_name not in set(benchmark_with_team["Metric"].tolist())
+        for metric_name in metric_values
+        if metric_name not in set(benchmark_with_column["Metric"].tolist())
     ]
     if missing_metrics:
-        benchmark_with_team = pd.concat(
+        benchmark_with_column = pd.concat(
             [
-                benchmark_with_team,
+                benchmark_with_column,
                 pd.DataFrame(
                     {
                         "Metric": missing_metrics,
-                        "NC State Avg": [team_values[metric_name] for metric_name in missing_metrics],
+                        column_name: [metric_values[metric_name] for metric_name in missing_metrics],
                     }
                 ),
             ],
             ignore_index=True,
             sort=False,
     )
-    return benchmark_with_team
+    return benchmark_with_column
+
+
+def with_nc_state_benchmark(
+    benchmark_df: pd.DataFrame,
+    team_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Append a derived NC State baseline column using the full local summary dataset."""
+    return with_derived_benchmark_column(
+        benchmark_df,
+        "NC State Avg",
+        aggregate_benchmark_metrics(team_df),
+    )
+
+
+def with_all_opponent_benchmark(
+    benchmark_df: pd.DataFrame,
+    team_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Append a derived aggregate benchmark column for opponent-side performance."""
+    return with_derived_benchmark_column(
+        benchmark_df,
+        "All Opponent Avg",
+        aggregate_opponent_benchmark_metrics(team_df),
+    )
+
+
+def available_benchmark_levels(benchmark_df: pd.DataFrame) -> list[str]:
+    """Return benchmark level labels in a stable display order."""
+    if benchmark_df.empty:
+        return []
+
+    levels = [str(column) for column in benchmark_df.columns if str(column) != "Metric"]
+    ordered = [level for level in BENCHMARK_LEVEL_DISPLAY_ORDER if level in levels]
+    dynamic_levels = sorted(level for level in levels if level not in ordered)
+    return ordered + dynamic_levels
+
+
+def benchmark_line_style(level: str, level_index: int) -> dict[str, str]:
+    """Provide a readable line style for both workbook and derived benchmark levels."""
+    fixed_styles = {
+        "NC State Avg": {"dash": "solid", "color": COLORBLIND_SAFE_CHART_COLORS["accent_red"]},
+        "All Opponent Avg": {"dash": "longdash", "color": COLORBLIND_SAFE_CHART_COLORS["accent_gray"]},
+        "Tour Avg": {"dash": "dot", "color": COLORBLIND_SAFE_CHART_COLORS["accent_black"]},
+        "Top 10 Avg": {"dash": "dash", "color": COLORBLIND_SAFE_CHART_COLORS["accent_taupe"]},
+    }
+    if level in fixed_styles:
+        return fixed_styles[level]
+
+    color_cycle = [
+        COLORBLIND_SAFE_CHART_COLORS["accent_red_dark"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_rose"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_gray"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_black"],
+        COLORBLIND_SAFE_CHART_COLORS["accent_taupe"],
+    ]
+    dash_cycle = ["longdash", "dashdot", "longdashdot", "dot"]
+    return {
+        "dash": dash_cycle[level_index % len(dash_cycle)],
+        "color": color_cycle[level_index % len(color_cycle)],
+    }
 
 
 def season_scoped_team_df(
@@ -1231,24 +1374,20 @@ def add_benchmark_lines(
         for spec in BENCHMARK_SPECS
         if spec["app_label"]
     }
-    line_styles = {
-        "NC State Avg": {"dash": "solid", "color": COLORBLIND_SAFE_CHART_COLORS["accent_red"]},
-        "Tour Avg": {"dash": "dot", "color": COLORBLIND_SAFE_CHART_COLORS["accent_black"]},
-        "Top 10 Avg": {"dash": "dash", "color": COLORBLIND_SAFE_CHART_COLORS["accent_taupe"]},
-    }
 
     for metric_label, _, _, _ in selected_metrics:
         workbook_metric = metric_to_workbook.get(metric_label)
         if not workbook_metric or workbook_metric not in lookup:
             continue
-        for level in selected_levels:
+        for level_index, level in enumerate(selected_levels):
             baseline_value = lookup[workbook_metric].get(level)
             if baseline_value is None:
                 continue
+            line_style = benchmark_line_style(level, level_index)
             figure.add_hline(
                 y=baseline_value,
-                line_dash=line_styles[level]["dash"],
-                line_color=line_styles[level]["color"],
+                line_dash=line_style["dash"],
+                line_color=line_style["color"],
                 opacity=0.9,
             )
             figure.add_annotation(
@@ -1261,7 +1400,7 @@ def add_benchmark_lines(
                 xanchor="left",
                 yanchor="middle",
                 align="left",
-                font={"color": line_styles[level]["color"], "size": 12},
+                font={"color": line_style["color"], "size": 12},
                 bgcolor="rgba(255, 253, 248, 0.92)",
             )
 
@@ -2488,21 +2627,22 @@ with st.sidebar:
     selected_opp_team = st.selectbox("Opp Team", filter_values["opp_teams"])
     selected_season = st.selectbox("Season", filter_values["seasons"])
     split_charts = st.checkbox("Split Charts W/L", value=False)
+    season_benchmark_df = season_scoped_team_df(summary_df, selected_season)
     benchmark_df = with_nc_state_benchmark(
         benchmark_df,
-        season_scoped_team_df(summary_df, selected_season),
+        season_benchmark_df,
+    )
+    benchmark_df = with_all_opponent_benchmark(
+        benchmark_df,
+        season_benchmark_df,
     )
     st.header("Baselines")
-    available_baseline_levels = [
-        level
-        for level, column in BENCHMARK_LEVEL_COLUMNS.items()
-        if not benchmark_df.empty and column in benchmark_df.columns
-    ]
+    available_baseline_levels = available_benchmark_levels(benchmark_df)
     selected_baseline_levels = st.multiselect(
         "Benchmark Lines",
         available_baseline_levels,
         default=["NC State Avg"] if "NC State Avg" in available_baseline_levels else [],
-        help="Overlay benchmark reference levels, including a derived NC State team average, on supported charts.",
+        help="Overlay benchmark reference levels, including derived NC State and all-opponent averages, on supported charts.",
     )
 
 filtered_df = filter_matches(
