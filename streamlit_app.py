@@ -22,6 +22,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from tennis_jupyter.analytics import (  # noqa: E402
+    add_match_rate_columns,
     available_filter_values,
     build_game_level_summary,
     build_player_comparison_summary,
@@ -931,6 +932,159 @@ def build_real_world_effect_plot(
     figure.update_xaxes(tickmode="linear", dtick=1)
     figure.update_yaxes(tickformat="+.0%")
     figure.add_hline(y=0, line_dash="dash", line_color=COLORBLIND_SAFE_CHART_COLORS["accent_black"])
+    return figure
+
+
+def build_outcome_probability_plot(
+    chart_df: pd.DataFrame,
+    *,
+    metric_column: str,
+    metric_label: str,
+    success_column: str,
+    failure_column: str,
+    outcome_label: str,
+    title: str,
+    bin_size_pct: int,
+    min_matches_per_bin: int,
+) -> go.Figure | None:
+    """Plot logistic-regression outcome probability plus observed-bin context."""
+    required_columns = [metric_column, success_column, failure_column]
+    if chart_df.empty or any(column not in chart_df.columns for column in required_columns):
+        return None
+
+    plot_df = chart_df[required_columns].copy()
+    plot_df[metric_column] = pd.to_numeric(plot_df[metric_column], errors="coerce")
+    plot_df[success_column] = pd.to_numeric(plot_df[success_column], errors="coerce").fillna(0.0)
+    plot_df[failure_column] = pd.to_numeric(plot_df[failure_column], errors="coerce").fillna(0.0)
+    plot_df = plot_df[
+        plot_df[metric_column].notna()
+        & ((plot_df[success_column] + plot_df[failure_column]) > 0)
+    ].copy()
+    if plot_df.empty:
+        return None
+
+    plot_df["Rate"] = plot_df[metric_column]
+    plot_df["Rate"] = plot_df["Rate"].clip(lower=0.0, upper=1.0)
+    expanded_rates: list[float] = []
+    expanded_outcomes: list[int] = []
+    for _, row in plot_df.iterrows():
+        rate = float(row[metric_column])
+        successes = int(max(0.0, float(row[success_column])))
+        failures = int(max(0.0, float(row[failure_column])))
+        if successes:
+            expanded_rates.extend([rate] * successes)
+            expanded_outcomes.extend([1] * successes)
+        if failures:
+            expanded_rates.extend([rate] * failures)
+            expanded_outcomes.extend([0] * failures)
+
+    if not expanded_outcomes:
+        return None
+
+    expanded_df = pd.DataFrame({"Rate": expanded_rates, "outcome": expanded_outcomes})
+    class_counts = expanded_df["outcome"].value_counts()
+    if len(class_counts) < 2 or class_counts.min() < 2:
+        return None
+
+    X = expanded_df[["Rate"]].to_numpy()
+    y = expanded_df["outcome"].to_numpy()
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    model = LogisticRegression(
+        C=1.0,
+        solver="lbfgs",
+        max_iter=1000,
+        random_state=42,
+    )
+    model.fit(X_scaled, y)
+
+    x_grid = np.linspace(0.0, 1.0, 201)
+    x_grid_scaled = scaler.transform(x_grid.reshape(-1, 1))
+    predicted_probability = model.predict_proba(x_grid_scaled)[:, 1]
+
+    step = max(1, int(bin_size_pct))
+    bin_edges = np.arange(0, 100 + step, step, dtype=float) / 100.0
+    if bin_edges[-1] < 1.0:
+        bin_edges = np.append(bin_edges, 1.0)
+    bin_edges[-1] = 1.000001
+
+    plot_df["Rate Bin"] = pd.cut(
+        plot_df["Rate"],
+        bins=bin_edges,
+        include_lowest=True,
+        right=False,
+    )
+    plot_df = plot_df[plot_df["Rate Bin"].notna()].copy()
+    if plot_df.empty:
+        return None
+
+    grouped = (
+        plot_df.groupby("Rate Bin", observed=False)
+        .agg(
+            Matches=("Rate", "size"),
+            Successes=(success_column, "sum"),
+            Failures=(failure_column, "sum"),
+            Mean_Rate=("Rate", "mean"),
+        )
+        .reset_index()
+    )
+    if grouped.empty:
+        return None
+    grouped["Trials"] = grouped["Successes"] + grouped["Failures"]
+    grouped["Observed Probability"] = safe_ratio(grouped["Successes"], grouped["Trials"])
+    grouped["Bin Left"] = pd.Series(
+        [float(interval.left) for interval in grouped["Rate Bin"]],
+        index=grouped.index,
+        dtype="float64",
+    )
+    grouped["Bin Right"] = pd.Series(
+        [min(float(interval.right), 1.0) for interval in grouped["Rate Bin"]],
+        index=grouped.index,
+        dtype="float64",
+    )
+    grouped["Bin Mid"] = (grouped["Bin Left"] + grouped["Bin Right"]) / 2.0
+    grouped["Bin Label"] = grouped.apply(
+        lambda row: f"{row['Bin Left']:.0%}-{row['Bin Right']:.0%}",
+        axis=1,
+    )
+    grouped = grouped[grouped["Matches"] >= max(1, int(min_matches_per_bin))].copy()
+    if grouped.empty:
+        return None
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=x_grid,
+            y=predicted_probability,
+            mode="lines",
+            name=f"Predicted {outcome_label}",
+            line=dict(color=COLORBLIND_SAFE_CHART_COLORS["accent_red"], width=4),
+            hovertemplate=(
+                metric_label
+                + ": %{x:.1%}<br>"
+                + "Predicted "
+                + outcome_label.lower()
+                + ": %{y:.1%}<extra></extra>"
+            ),
+        ),
+    )
+
+    apply_accessible_figure_style(figure, title=title, height=420)
+    figure.update_layout(
+        hovermode="closest",
+        legend_title="Series",
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
+    figure.update_xaxes(
+        title_text=metric_label,
+        tickformat=".0%",
+        range=[0, 1],
+    )
+    figure.update_yaxes(
+        title_text=outcome_label,
+        tickformat=".0%",
+        range=[0, 1],
+    )
     return figure
 
 
@@ -2703,6 +2857,7 @@ tabs = st.tabs(
         "Serve / Return Match Stats",
         "Serve Stats Trend",
         "Serve Efficiency Funnel",
+        "Serve Win Probability",
         "Rally Length Wins",
         "Rally Bins",
         "Pressure Bins",
@@ -2985,7 +3140,7 @@ with tabs[4]:
         else:
             st.info("No serve funnel data is available for the current filters.")
 
-with tabs[5]:
+with tabs[6]:
     st.subheader(f"Rally Length Wins: {current_scope}")
     rally_profile_title = (
         f"Rally Profile vs Match Wins (split W/L) ({current_scope})"
@@ -3014,7 +3169,7 @@ with tabs[5]:
         else:
             st.info("No rally profile data is available for the current filters.")
 
-with tabs[6]:
+with tabs[7]:
     st.subheader(f"Rally Bins: {current_scope}")
     rally_bins_title = (
         f"Rally Bins Split W/L (each % = sets in cell / all currently filtered sets) ({current_scope})"
@@ -3043,7 +3198,7 @@ with tabs[6]:
         else:
             st.info("No rally-bin data is available for the current filters.")
 
-with tabs[7]:
+with tabs[8]:
     st.subheader(f"Pressure Bins: {current_scope}")
     pressure_title = (
         f"Pressure Bins Split W/L (each % = sets in cell / all currently filtered sets) ({current_scope})"
@@ -3107,7 +3262,7 @@ with tabs[7]:
         else:
             st.info("No pressure-bin data is available for the current filters.")
 
-with tabs[8]:
+with tabs[9]:
     st.subheader(f"Score-State Performance: {current_scope}")
     score_state_views = {
         "Service Games": {
@@ -3338,7 +3493,121 @@ with tabs[8]:
             width="stretch",
         )
 
-with tabs[9]:
+with tabs[5]:
+    st.subheader(f"Serve Win Probability: {current_scope}")
+    st.caption(
+        "Logistic-regression probability curves with observed-bin context from real match summaries."
+    )
+
+    control_col1, control_col2, control_col3 = st.columns(3)
+    with control_col1:
+        outcome_lens = st.selectbox(
+            "Outcome lens",
+            ["Match Win Probability", "Set Win Probability", "Game Win Probability"],
+            key="serve_win_probability_outcome_lens",
+        )
+    with control_col2:
+        bin_size_pct = st.slider(
+            "Bin width (percentage points)",
+            min_value=5,
+            max_value=20,
+            value=10,
+            step=5,
+            key="serve_win_rate_bin_width",
+        )
+    with control_col3:
+        min_matches_per_bin = st.slider(
+            "Minimum matches per bin",
+            min_value=1,
+            max_value=10,
+            value=3,
+            step=1,
+            key="serve_win_rate_min_matches",
+        )
+
+    serve_bin_specs = [
+        {
+            "label": "1st Serve In %",
+            "metric_column": "1st Serve In %",
+        },
+        {
+            "label": "1st Serve Won %",
+            "metric_column": "1st Serve Won %",
+        },
+        {
+            "label": "2nd Serve In %",
+            "metric_column": "2nd Serve In %",
+        },
+        {
+            "label": "2nd Serve Won %",
+            "metric_column": "2nd Serve Won %",
+        },
+    ]
+
+    serve_rate_df = add_match_rate_columns(filtered_df)
+    if outcome_lens == "Match Win Probability":
+        serve_rate_df["Outcome Successes"] = (
+            serve_rate_df["Match Result"].fillna("").astype(str).str.upper().eq("W").astype("float64")
+        )
+        serve_rate_df["Outcome Failures"] = (
+            serve_rate_df["Match Result"].fillna("").astype(str).str.upper().eq("L").astype("float64")
+        )
+    elif outcome_lens == "Set Win Probability":
+        serve_rate_df["Outcome Successes"] = pd.to_numeric(
+            serve_rate_df["Sets Won"], errors="coerce"
+        ).fillna(0.0)
+        serve_rate_df["Outcome Failures"] = pd.to_numeric(
+            serve_rate_df["Sets Lost"], errors="coerce"
+        ).fillna(0.0)
+    else:
+        serve_rate_df["Outcome Successes"] = pd.to_numeric(
+            serve_rate_df["Games Won"], errors="coerce"
+        ).fillna(0.0)
+        serve_rate_df["Outcome Failures"] = pd.to_numeric(
+            serve_rate_df["Games Lost"], errors="coerce"
+        ).fillna(0.0)
+
+    rendered_bin_chart = False
+    for row_start in range(0, len(serve_bin_specs), 2):
+        row_specs = serve_bin_specs[row_start : row_start + 2]
+        columns = st.columns(len(row_specs))
+        for col_index, spec in enumerate(row_specs):
+            with columns[col_index]:
+                figure = build_outcome_probability_plot(
+                    serve_rate_df,
+                    metric_column=spec["metric_column"],
+                    metric_label=spec["label"],
+                    success_column="Outcome Successes",
+                    failure_column="Outcome Failures",
+                    outcome_label=outcome_lens,
+                    title=f"{spec['label']} vs {outcome_lens}",
+                    bin_size_pct=bin_size_pct,
+                    min_matches_per_bin=min_matches_per_bin,
+                )
+                if figure:
+                    st.plotly_chart(
+                        figure,
+                        width="stretch",
+                        key=chart_key(
+                            "serve_win_rate_bins",
+                            *base_chart_key_parts,
+                            spec["label"],
+                            bin_size_pct,
+                            min_matches_per_bin,
+                        ),
+                    )
+                    rendered_bin_chart = True
+                else:
+                    st.info(
+                        f"Not enough matches to build bins for {spec['label']} with the current filters."
+                    )
+
+    if rendered_bin_chart:
+        st.markdown(
+            "The red line is the logistic-regression probability curve for the selected outcome lens."
+        )
+
+with tabs[10]:
     st.subheader(f"Serve / Return Score-State Rates: {current_scope}")
     rate_score_state_views = {
         "1st Serve In %": {

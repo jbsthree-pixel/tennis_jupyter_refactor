@@ -12,6 +12,28 @@ from .pipeline.summary import _clean_name, _load_name_mapping
 from .shared import safe_ratio
 
 
+def add_match_rate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with commonly reused serve/return rate columns added."""
+    out = df.copy()
+    rate_specs = [
+        ("1st Serve In %", "first_serve_in", "first_serve_attempt"),
+        ("1st Serve Won %", "first_serve_won", "first_serve_in"),
+        ("2nd Serve In %", "second_serve_in", "second_serve_attempt"),
+        ("2nd Serve Won %", "second_serve_won", "second_serve_attempt"),
+        ("Ace %", "ace", "first_serve_attempt"),
+        ("DF %", "double_fault", "second_serve_attempt"),
+        ("1st Serve Not Returned %", "first_serve_not_returned", "first_serve_in"),
+        ("1st Return In %", "first_serve_return_in", "first_serve_return_opportunity"),
+        ("1st Return Won %", "first_serve_return_won", "first_serve_return_opportunity"),
+        ("2nd Return In %", "second_serve_return_in", "second_serve_return_opportunity"),
+        ("2nd Return Won %", "second_serve_return_won", "second_serve_return_opportunity"),
+    ]
+    for rate_label, numerator_column, denominator_column in rate_specs:
+        if numerator_column in out.columns and denominator_column in out.columns:
+            out[rate_label] = safe_ratio(out[numerator_column], out[denominator_column])
+    return out
+
+
 def filter_matches(
     df: pd.DataFrame,
     player: str | list[str] | tuple[str, ...] | set[str] | None = None,
@@ -254,33 +276,39 @@ def build_player_comparison_summary(
     )
 
     comparison["Win Rate"] = safe_ratio(comparison["Wins"], comparison["Matches"])
-    comparison["1st Serve In %"] = safe_ratio(
-        comparison["First_Serve_In"],
-        comparison["First_Serve_Attempts"],
+    comparison = comparison.rename(
+        columns={
+            "First_Serve_Attempts": "first_serve_attempt",
+            "First_Serve_In": "first_serve_in",
+            "First_Serve_Won": "first_serve_won",
+            "Second_Serve_Attempts": "second_serve_attempt",
+            "Second_Serve_Won": "second_serve_won",
+            "First_Return_Opps": "first_serve_return_opportunity",
+            "First_Return_Won": "first_serve_return_won",
+            "Second_Return_Opps": "second_serve_return_opportunity",
+            "Second_Return_Won": "second_serve_return_won",
+            "Break_Points_Earned": "break_point_total",
+            "Break_Points_Converted": "break_point_won",
+            "Break_Points_Faced": "break_point_faced",
+            "Break_Points_Saved": "break_point_saved",
+        }
     )
-    comparison["1st Serve Won %"] = safe_ratio(
-        comparison["First_Serve_Won"],
-        comparison["First_Serve_In"],
-    )
-    comparison["2nd Serve Won %"] = safe_ratio(
-        comparison["Second_Serve_Won"],
-        comparison["Second_Serve_Attempts"],
-    )
+    comparison = add_match_rate_columns(comparison)
     comparison["1st Return Won %"] = safe_ratio(
-        comparison["First_Return_Won"],
-        comparison["First_Return_Opps"],
+        comparison["first_serve_return_won"],
+        comparison["first_serve_return_opportunity"],
     )
     comparison["2nd Return Won %"] = safe_ratio(
-        comparison["Second_Return_Won"],
-        comparison["Second_Return_Opps"],
+        comparison["second_serve_return_won"],
+        comparison["second_serve_return_opportunity"],
     )
     comparison["BP Won %"] = safe_ratio(
-        comparison["Break_Points_Converted"],
-        comparison["Break_Points_Earned"],
+        comparison["break_point_won"],
+        comparison["break_point_total"],
     )
     comparison["BP Saved %"] = safe_ratio(
-        comparison["Break_Points_Saved"],
-        comparison["Break_Points_Faced"],
+        comparison["break_point_saved"],
+        comparison["break_point_faced"],
     )
 
     comparison = comparison[
@@ -380,29 +408,16 @@ def build_serve_return_match_stats(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
     grouped["+/-"] = grouped["ace"] - grouped["double_fault"]
-    grouped["Ace %"] = safe_ratio(grouped["ace"], grouped["first_serve_attempt"])
-    grouped["DF %"] = safe_ratio(grouped["double_fault"], grouped["second_serve_attempt"])
-    grouped["1SNR %"] = safe_ratio(grouped["first_serve_not_returned"], grouped["first_serve_in"])
-    grouped["First Serve %"] = safe_ratio(grouped["first_serve_in"], grouped["first_serve_attempt"])
-    grouped["1st Serve Win %"] = safe_ratio(grouped["first_serve_won"], grouped["first_serve_in"])
-    grouped["Second Serve %"] = safe_ratio(grouped["second_serve_in"], grouped["second_serve_attempt"])
-    grouped["2nd Serve Win %"] = safe_ratio(grouped["second_serve_won"], grouped["second_serve_attempt"])
-    grouped["First Serve Returns %"] = safe_ratio(
-        grouped["first_serve_return_in"],
-        grouped["first_serve_return_opportunity"],
-    )
-    grouped["First Serve Returns Won %"] = safe_ratio(
-        grouped["first_serve_return_won"],
-        grouped["first_serve_return_opportunity"],
-    )
-    grouped["Second Serve Returns %"] = safe_ratio(
-        grouped["second_serve_return_in"],
-        grouped["second_serve_return_opportunity"],
-    )
-    grouped["Second Serve Returns Won %"] = safe_ratio(
-        grouped["second_serve_return_won"],
-        grouped["second_serve_return_opportunity"],
-    )
+    grouped = add_match_rate_columns(grouped)
+    grouped["1SNR %"] = grouped["1st Serve Not Returned %"]
+    grouped["First Serve %"] = grouped["1st Serve In %"]
+    grouped["1st Serve Win %"] = grouped["1st Serve Won %"]
+    grouped["Second Serve %"] = grouped["2nd Serve In %"]
+    grouped["2nd Serve Win %"] = grouped["2nd Serve Won %"]
+    grouped["First Serve Returns %"] = grouped["1st Return In %"]
+    grouped["First Serve Returns Won %"] = grouped["1st Return Won %"]
+    grouped["Second Serve Returns %"] = grouped["2nd Return In %"]
+    grouped["Second Serve Returns Won %"] = grouped["2nd Return Won %"]
 
     result = pd.DataFrame(
         {
@@ -589,31 +604,7 @@ def build_game_level_summary(
         grouped["short_rally_won"] + grouped["medium_rally_won"] + grouped["long_rally_won"]
     )
 
-    grouped["1st Serve In %"] = safe_ratio(grouped["first_serve_in"], grouped["first_serve_attempt"])
-    grouped["1st Serve Won %"] = safe_ratio(grouped["first_serve_won"], grouped["first_serve_in"])
-    grouped["2nd Serve Won %"] = safe_ratio(grouped["second_serve_won"], grouped["second_serve_attempt"])
-    grouped["Ace %"] = safe_ratio(grouped["ace"], grouped["first_serve_attempt"])
-    grouped["DF %"] = safe_ratio(grouped["double_fault"], grouped["second_serve_attempt"])
-    grouped["1st Serve Not Returned %"] = safe_ratio(
-        grouped["first_serve_not_returned"],
-        grouped["first_serve_in"],
-    )
-    grouped["1st Return In %"] = safe_ratio(
-        grouped["first_serve_return_in"],
-        grouped["first_serve_return_opportunity"],
-    )
-    grouped["1st Return Won %"] = safe_ratio(
-        grouped["first_serve_return_won"],
-        grouped["first_serve_return_opportunity"],
-    )
-    grouped["2nd Return In %"] = safe_ratio(
-        grouped["second_serve_return_in"],
-        grouped["second_serve_return_opportunity"],
-    )
-    grouped["2nd Return Won %"] = safe_ratio(
-        grouped["second_serve_return_won"],
-        grouped["second_serve_return_opportunity"],
-    )
+    grouped = add_match_rate_columns(grouped)
     grouped["Short Rally Win Share"] = safe_ratio(
         grouped["short_rally_won"],
         grouped["rally_wins_total"],
