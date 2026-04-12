@@ -28,9 +28,9 @@ def load_concat_csv(folder: Path) -> pd.DataFrame:
     if not folder.is_dir():
         raise NotADirectoryError(f"Not a directory: {folder}")
 
-    files = sorted(folder.glob("*.csv"))
+    files = sorted([*folder.glob("*.csv"), *folder.glob("*.csv.gz")])
     if not files:
-        raise FileNotFoundError(f"No CSV files found in: {folder}")
+        raise FileNotFoundError(f"No CSV or CSV.GZ files found in: {folder}")
 
     dataframes = [pd.read_csv(file_path) for file_path in files]
     base_columns = list(dataframes[0].columns)

@@ -2742,14 +2742,17 @@ st.markdown(
 )
 st.caption("Cross-platform local browser app for Windows and macOS.")
 
-default_csv = PROJECT_ROOT / "data" / "input" / "team_singles_stats.csv"
+default_csv = PROJECT_ROOT / "data" / "input" / "team_singles_stats.csv.gz"
+legacy_default_csv = PROJECT_ROOT / "data" / "input" / "team_singles_stats.csv"
 default_benchmark_xlsx = PROJECT_ROOT / "data" / "input" / "Tour Data 2025.xlsx"
 source_path = default_csv
+if not source_path.exists() and legacy_default_csv.exists():
+    source_path = legacy_default_csv
 name_map_path = None
 benchmark_path = default_benchmark_xlsx if default_benchmark_xlsx.exists() else None
 
 if not source_path.exists():
-    st.error(f"Missing source CSV: {source_path}")
+    st.error(f"Missing source CSV: {default_csv} or {legacy_default_csv}")
     st.stop()
 
 csv_mtime = source_path.stat().st_mtime
