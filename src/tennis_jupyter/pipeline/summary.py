@@ -42,6 +42,72 @@ INDICATOR_COLUMNS = [
     "long_rally_won",
 ]
 
+NO_SCHOOL_LISTED = "No School Listed"
+
+OPPONENT_SCHOOL_ALIASES = {
+    "App St": "App State",
+    "East Tenn. State": "ETSU",
+    "FSU": "Florida State",
+    "Gergia Tech": "Georgia Tech",
+    "N/A": NO_SCHOOL_LISTED,
+    "ND": "Notre Dame",
+    "Tennesse": "Tennessee",
+    "VaTech": "Virginia Tech",
+}
+
+
+def opponent_school_from_match_name(value: object) -> str:
+    """Extract the opponent school from match names like 'NC State & School'."""
+    if value is None or pd.isna(value):
+        return NO_SCHOOL_LISTED
+
+    match_name = str(value).strip()
+    if not match_name:
+        return NO_SCHOOL_LISTED
+
+    marker = "NC State &"
+    marker_index = match_name.lower().find(marker.lower())
+    if marker_index == -1:
+        return NO_SCHOOL_LISTED
+
+    school = match_name[marker_index + len(marker):].strip()
+    return OPPONENT_SCHOOL_ALIASES.get(school, school) if school else NO_SCHOOL_LISTED
+
+
+def opponent_school_from_row(row: pd.Series) -> str:
+    """Extract opponent school while rejecting participant-name leftovers."""
+    match_name_column = (
+        "matchName"
+        if "matchName" in row.index
+        else "match_name"
+        if "match_name" in row.index
+        else None
+    )
+    school = (
+        opponent_school_from_match_name(row[match_name_column])
+        if match_name_column
+        else NO_SCHOOL_LISTED
+    )
+    if school == NO_SCHOOL_LISTED:
+        return school
+
+    normalized_school = school.casefold()
+    participant_tokens = set()
+    for participant_column in ["player", "opp"]:
+        participant = row.get(participant_column, "")
+        if pd.isna(participant):
+            continue
+        participant_text = str(participant).strip()
+        if not participant_text:
+            continue
+        participant_tokens.add(participant_text.casefold())
+        participant_tokens.update(
+            token.casefold()
+            for token in re.findall(r"[A-Za-z][A-Za-z'’-]*", participant_text)
+        )
+
+    return NO_SCHOOL_LISTED if normalized_school in participant_tokens else school
+
 
 def parse_final_score(score: str | float | None) -> dict[str, int]:
     """Split a final-score string into aggregate game and set counts."""
@@ -136,6 +202,11 @@ def build_match_summary(
     if "opp_team" not in df.columns:
         df["opp_team"] = ""
     df["opp_team"] = df["opp_team"].fillna("").astype(str).str.strip()
+    df["opponent_school"] = df.apply(opponent_school_from_row, axis=1)
+    df["opp_team"] = df["opp_team"].mask(
+        df["opp_team"].eq("") & df["opponent_school"].ne(NO_SCHOOL_LISTED),
+        df["opponent_school"],
+    )
 
     missing_indicators = [column for column in INDICATOR_COLUMNS if column not in df.columns]
     if missing_indicators:
@@ -152,6 +223,7 @@ def build_match_summary(
         "player",
         "opp",
         "opp_team",
+        "opponent_school",
         "Match Date",
         "Match Year",
         "Match Month Name",

@@ -8,7 +8,12 @@ import pandas as pd
 
 from .constants import MONTH_ORDER, RAW_FIELD_FORMULAS
 from .pipeline import add_rawpoints_columns, build_match_summary, validate_required_columns
-from .pipeline.summary import _clean_name, _load_name_mapping
+from .pipeline.summary import (
+    NO_SCHOOL_LISTED,
+    _clean_name,
+    _load_name_mapping,
+    opponent_school_from_row,
+)
 from .shared import safe_ratio
 
 
@@ -40,6 +45,7 @@ def filter_matches(
     year: int | None = None,
     month_name: str | None = None,
     opp_team: str | None = None,
+    opponent_school: str | None = None,
     season_label: str | None = None,
 ) -> pd.DataFrame:
     """Filter the match-summary dataframe using app-friendly selectors."""
@@ -68,10 +74,22 @@ def filter_matches(
             filtered = filtered[normalized == ""]
         else:
             filtered = filtered[normalized == opp_team]
+    if opponent_school and opponent_school != "All":
+        normalized_school = opponent_school_display_series(filtered)
+        filtered = filtered[normalized_school == opponent_school]
     if season_label and season_label != "All":
         filtered = filtered[filtered["_Season Label"] == season_label]
 
     return filtered.reset_index(drop=True)
+
+
+def opponent_school_display_series(df: pd.DataFrame) -> pd.Series:
+    """Return display-ready opponent-school labels for filtering."""
+    if "opponent_school" not in df.columns:
+        return pd.Series([NO_SCHOOL_LISTED] * len(df), index=df.index)
+
+    school = df["opponent_school"].fillna("").astype(str).str.strip()
+    return school.where(school != "", NO_SCHOOL_LISTED)
 
 
 def summarize_key_insights(df: pd.DataFrame) -> dict[str, object]:
@@ -143,6 +161,15 @@ def available_filter_values(df: pd.DataFrame) -> dict[str, list[str]]:
         season_df["opp_team"].isna().any()
         or (season_df["opp_team"].fillna("").astype(str).str.strip() == "").any()
     )
+    opponent_school_values = opponent_school_display_series(season_df)
+    opponent_schools = sorted(
+        {
+            value
+            for value in opponent_school_values.astype(str)
+            if value and value != NO_SCHOOL_LISTED
+        }
+    )
+    has_no_school = (opponent_school_values == NO_SCHOOL_LISTED).any()
     seasons = (
         season_df[["_Season Sort", "_Season Label"]]
         .drop_duplicates()
@@ -154,6 +181,9 @@ def available_filter_values(df: pd.DataFrame) -> dict[str, list[str]]:
         "years": ["All"] + [str(year) for year in years],
         "months": ["All"] + months,
         "opp_teams": ["All"] + (["None Listed"] if has_blank_opp else []) + opp_teams,
+        "opponent_schools": ["All"]
+        + ([NO_SCHOOL_LISTED] if has_no_school else [])
+        + opponent_schools,
         "seasons": ["All"] + seasons["_Season Label"].astype(str).tolist(),
     }
 
@@ -513,6 +543,11 @@ def build_game_level_summary(
     if "opp_team" not in df.columns:
         df["opp_team"] = ""
     df["opp_team"] = df["opp_team"].fillna("").astype(str).str.strip()
+    df["opponent_school"] = df.apply(opponent_school_from_row, axis=1)
+    df["opp_team"] = df["opp_team"].mask(
+        df["opp_team"].eq("") & df["opponent_school"].ne(NO_SCHOOL_LISTED),
+        df["opponent_school"],
+    )
     if "gamePoint" not in df.columns:
         df["gamePoint"] = False
 
@@ -568,6 +603,7 @@ def build_game_level_summary(
         "player",
         "opp",
         "opp_team",
+        "opponent_school",
         "Match Date",
         "Match Year",
         "Match Month Name",

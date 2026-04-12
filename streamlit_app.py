@@ -153,6 +153,8 @@ OPPONENT_BENCHMARK_SPECS = [
     },
 ]
 
+SUMMARY_CACHE_SCHEMA_VERSION = 2
+
 
 st.set_page_config(page_title="Tennis Match Summary", layout="wide")
 
@@ -318,9 +320,10 @@ def load_summary_cached(
     name_map_xlsx: str | None,
     csv_mtime: float,
     name_map_mtime: float | None,
+    schema_version: int,
 ) -> pd.DataFrame:
     """Cache summary rebuilds until the source files change."""
-    _ = csv_mtime, name_map_mtime
+    _ = csv_mtime, name_map_mtime, schema_version
     return load_match_summary(input_csv=input_csv, name_map_xlsx=name_map_xlsx)
 
 
@@ -330,9 +333,10 @@ def load_game_summary_cached(
     name_map_xlsx: str | None,
     csv_mtime: float,
     name_map_mtime: float | None,
+    schema_version: int,
 ) -> pd.DataFrame:
     """Cache game-level rebuilds until the source files change."""
-    _ = csv_mtime, name_map_mtime
+    _ = csv_mtime, name_map_mtime, schema_version
     return build_game_level_summary(input_csv=input_csv, name_map_xlsx=name_map_xlsx)
 
 
@@ -395,8 +399,6 @@ def image_to_data_uri(path: Path) -> str | None:
 
 def scope_text(
     player: str | list[str],
-    year: str,
-    month_name: str,
     opp_team: str,
     season: str,
 ) -> str:
@@ -410,7 +412,7 @@ def scope_text(
     else:
         player_label = player
 
-    for value in [player_label, year, month_name, opp_team, season]:
+    for value in [player_label, opp_team, season]:
         if value and value != "All":
             labels.append(value)
     return " | ".join(labels) if labels else "Current Filters"
@@ -2752,12 +2754,19 @@ if not source_path.exists():
 
 csv_mtime = source_path.stat().st_mtime
 name_map_mtime = name_map_path.stat().st_mtime if name_map_path and name_map_path.exists() else None
-summary_df = load_summary_cached(str(source_path), str(name_map_path) if name_map_path else None, csv_mtime, name_map_mtime)
+summary_df = load_summary_cached(
+    str(source_path),
+    str(name_map_path) if name_map_path else None,
+    csv_mtime,
+    name_map_mtime,
+    SUMMARY_CACHE_SCHEMA_VERSION,
+)
 game_df = load_game_summary_cached(
     str(source_path),
     str(name_map_path) if name_map_path else None,
     csv_mtime,
     name_map_mtime,
+    SUMMARY_CACHE_SCHEMA_VERSION,
 )
 benchmark_df = pd.DataFrame()
 if benchmark_path and benchmark_path.exists():
@@ -2776,8 +2785,6 @@ with st.sidebar:
         default=[],
         help="Leave empty to include all players, or pick any subset to compare.",
     )
-    selected_year = st.selectbox("Year", filter_values["years"])
-    selected_month = st.selectbox("Month", filter_values["months"])
     selected_opp_team = st.selectbox("Opp Team", filter_values["opp_teams"])
     selected_season = st.selectbox("Season", filter_values["seasons"])
     split_charts = st.checkbox("Split Charts W/L", value=False)
@@ -2802,24 +2809,22 @@ with st.sidebar:
 filtered_df = filter_matches(
     summary_df,
     player=selected_players,
-    year=None if selected_year == "All" else int(selected_year),
-    month_name=selected_month,
     opp_team=selected_opp_team,
     season_label=selected_season,
 )
 filtered_game_df = filter_matches(
     game_df,
     player=selected_players,
-    year=None if selected_year == "All" else int(selected_year),
-    month_name=selected_month,
     opp_team=selected_opp_team,
     season_label=selected_season,
 )
-current_scope = scope_text(selected_players, selected_year, selected_month, selected_opp_team, selected_season)
+current_scope = scope_text(
+    selected_players,
+    selected_opp_team,
+    selected_season,
+)
 base_chart_key_parts = (
     tuple(selected_players),
-    selected_year,
-    selected_month,
     selected_opp_team,
     selected_season,
     split_charts,
