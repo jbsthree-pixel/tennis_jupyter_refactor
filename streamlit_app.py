@@ -69,10 +69,24 @@ BENCHMARK_SPECS = [
         "denominator": "first_serve_in",
     },
     {
+        "workbook_metric": "2nd Serve In",
+        "app_label": "2nd Serve In %",
+        "table_column": "Second Serve %",
+        "numerator": "second_serve_in",
+        "denominator": "second_serve_attempt",
+    },
+    {
         "workbook_metric": "2nd Serve Points Won",
         "app_label": "2nd Serve Won %",
         "table_column": "2nd Serve Win %",
         "numerator": "second_serve_won",
+        "denominator": "second_serve_attempt",
+    },
+    {
+        "workbook_metric": "Double Faults",
+        "app_label": "Double Fault %",
+        "table_column": "DF %",
+        "numerator": "double_fault",
         "denominator": "second_serve_attempt",
     },
     {
@@ -124,9 +138,19 @@ OPPONENT_BENCHMARK_SPECS = [
         "denominator": "first_serve_return_opportunity",
     },
     {
+        "workbook_metric": "2nd Serve In",
+        "numerator": "second_serve_return_opportunity",
+        "denominator": {"sum": ("second_serve_return_opportunity", "opp_double_fault")},
+    },
+    {
         "workbook_metric": "2nd Serve Points Won",
         "numerator": ("second_serve_return_opportunity", "second_serve_return_won"),
-        "denominator": ("second_serve_return_opportunity", "opp_double_fault"),
+        "denominator": {"sum": ("second_serve_return_opportunity", "opp_double_fault")},
+    },
+    {
+        "workbook_metric": "Double Faults",
+        "numerator": "opp_double_fault",
+        "denominator": {"sum": ("second_serve_return_opportunity", "opp_double_fault")},
     },
     {
         "workbook_metric": "1st Serves Unreturned",
@@ -1334,20 +1358,31 @@ def aggregate_benchmark_metrics(chart_df: pd.DataFrame) -> dict[str, float]:
 
 def _summed_series_value(
     totals: pd.DataFrame,
-    column_or_difference: str | tuple[str, str],
+    column_or_expression: str | tuple[str, str] | dict[str, tuple[str, ...]],
 ) -> float:
-    """Sum a numeric column or the positive difference between two columns."""
-    if isinstance(column_or_difference, tuple):
-        left, right = column_or_difference
+    """Sum a numeric column, a difference between columns, or a column group."""
+    if isinstance(column_or_expression, dict):
+        sum_columns = column_or_expression.get("sum", ())
+        if not sum_columns or any(column not in totals.columns for column in sum_columns):
+            return 0.0
+        return float(
+            sum(
+                pd.to_numeric(totals[column], errors="coerce").fillna(0).sum()
+                for column in sum_columns
+            )
+        )
+
+    if isinstance(column_or_expression, tuple):
+        left, right = column_or_expression
         if left not in totals.columns or right not in totals.columns:
             return 0.0
         left_values = pd.to_numeric(totals[left], errors="coerce").fillna(0)
         right_values = pd.to_numeric(totals[right], errors="coerce").fillna(0)
         return float((left_values - right_values).sum())
 
-    if column_or_difference not in totals.columns:
+    if column_or_expression not in totals.columns:
         return 0.0
-    return float(pd.to_numeric(totals[column_or_difference], errors="coerce").fillna(0).sum())
+    return float(pd.to_numeric(totals[column_or_expression], errors="coerce").fillna(0).sum())
 
 
 def aggregate_opponent_benchmark_metrics(chart_df: pd.DataFrame) -> dict[str, float]:
