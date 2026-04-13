@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
+DATA_INPUT_DIR = PROJECT_ROOT / "data" / "input"
 
 from tennis_jupyter.analytics import (  # noqa: E402
     add_match_rate_columns,
@@ -421,6 +424,34 @@ def image_to_data_uri(path: Path) -> str | None:
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     image_type = path.suffix.lower().lstrip(".") or "png"
     return f"data:image/{image_type};base64,{encoded}"
+
+
+def available_source_csvs(data_dir: Path) -> list[Path]:
+    """Return CSV-like source files that can be selected from the app data folder."""
+    if not data_dir.exists():
+        return []
+
+    source_paths = [*data_dir.glob("*.csv"), *data_dir.glob("*.csv.gz")]
+    return sorted(set(source_paths), key=lambda path: path.name.lower())
+
+
+def source_path_label(path: Path) -> str:
+    """Display source files relative to the project when possible."""
+    try:
+        return path.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return path.name
+
+
+def uploaded_source_path(uploaded_file) -> Path:
+    """Write an uploaded CSV to a stable temp path and return it for path-based loaders."""
+    file_bytes = uploaded_file.getvalue()
+    digest = hashlib.sha256(file_bytes).hexdigest()[:12]
+    suffixes = "".join(Path(uploaded_file.name).suffixes) or ".csv"
+    temp_path = Path(tempfile.gettempdir()) / f"tennis_source_{digest}{suffixes}"
+    if not temp_path.exists() or temp_path.read_bytes() != file_bytes:
+        temp_path.write_bytes(file_bytes)
+    return temp_path
 
 
 def scope_text(
@@ -2853,14 +2884,57 @@ st.markdown(
 )
 st.caption("Cross-platform local browser app for Windows and macOS.")
 
-default_csv = PROJECT_ROOT / "data" / "input" / "team_singles_stats.csv.gz"
-legacy_default_csv = PROJECT_ROOT / "data" / "input" / "team_singles_stats.csv"
-default_benchmark_xlsx = PROJECT_ROOT / "data" / "input" / "Tour Data 2025.xlsx"
-source_path = default_csv
-if not source_path.exists() and legacy_default_csv.exists():
-    source_path = legacy_default_csv
+default_csv = DATA_INPUT_DIR / "team_singles_stats.csv.gz"
+legacy_default_csv = DATA_INPUT_DIR / "team_singles_stats.csv"
+default_benchmark_xlsx = DATA_INPUT_DIR / "Tour Data 2025.xlsx"
+local_source_paths = available_source_csvs(DATA_INPUT_DIR)
+preferred_source_path = default_csv
+if not preferred_source_path.exists() and legacy_default_csv.exists():
+    preferred_source_path = legacy_default_csv
+if not preferred_source_path.exists() and local_source_paths:
+    preferred_source_path = local_source_paths[0]
 name_map_path = None
 benchmark_path = default_benchmark_xlsx if default_benchmark_xlsx.exists() else None
+
+with st.sidebar:
+    st.header("Source File")
+    source_mode = st.radio(
+        "Match data source",
+        ["Repository file", "Upload local file"],
+        index=0,
+        help="Use the bundled repository data by default, or upload a CSV from your computer.",
+    )
+    if source_mode == "Repository file":
+        if not local_source_paths:
+            source_path = preferred_source_path
+            st.warning(f"No CSV files found in `{source_path_label(DATA_INPUT_DIR)}`.")
+        else:
+            source_options = {source_path_label(path): path for path in local_source_paths}
+            preferred_label = source_path_label(preferred_source_path)
+            source_labels = list(source_options)
+            source_index = (
+                source_labels.index(preferred_label)
+                if preferred_label in source_labels
+                else 0
+            )
+            selected_source_label = st.selectbox(
+                "Choose repository data file",
+                source_labels,
+                index=source_index,
+            )
+            source_path = source_options[selected_source_label]
+            st.caption(f"Working from `{source_path_label(source_path)}`")
+    else:
+        uploaded_csv = st.file_uploader(
+            "Choose local CSV",
+            type=["csv", "gz"],
+            help="Upload a CSV or CSV.GZ file with the same columns as the source data.",
+        )
+        if uploaded_csv is None:
+            st.info("Upload a CSV file to continue.")
+            st.stop()
+        source_path = uploaded_source_path(uploaded_csv)
+        st.caption(f"Working from uploaded `{uploaded_csv.name}`")
 
 if not source_path.exists():
     st.error(f"Missing source CSV: {default_csv} or {legacy_default_csv}")
