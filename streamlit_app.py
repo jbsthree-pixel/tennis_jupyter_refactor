@@ -50,6 +50,8 @@ BENCHMARK_LEVEL_DISPLAY_ORDER = [
     "Tour Avg",
     "Top 10 Avg",
 ]
+BENCHMARK_LABEL_MIN_GAP = 0.15
+BENCHMARK_LABEL_Y_BOUNDS = (0.02, 0.98)
 
 BENCHMARK_SPECS = [
     {
@@ -1531,6 +1533,7 @@ def add_benchmark_lines(
         if spec["app_label"]
     }
 
+    labels: list[dict[str, object]] = []
     for metric_label, _, _, _ in selected_metrics:
         workbook_metric = metric_to_workbook.get(metric_label)
         if not workbook_metric or workbook_metric not in lookup:
@@ -1546,19 +1549,92 @@ def add_benchmark_lines(
                 line_color=line_style["color"],
                 opacity=0.9,
             )
-            figure.add_annotation(
+            labels.append(
+                {
+                    "metric_label": metric_label,
+                    "level": level,
+                    "baseline_value": baseline_value,
+                    "line_style": line_style,
+                }
+            )
+
+    if not labels:
+        return
+
+    label_positions = spread_benchmark_label_positions(
+        [float(label["baseline_value"]) for label in labels],
+        min_gap=BENCHMARK_LABEL_MIN_GAP,
+        lower=BENCHMARK_LABEL_Y_BOUNDS[0],
+        upper=BENCHMARK_LABEL_Y_BOUNDS[1],
+    )
+    for label, label_y in zip(labels, label_positions):
+        baseline_value = float(label["baseline_value"])
+        line_style = label["line_style"]
+        if not isinstance(line_style, dict):
+            continue
+        line_color = str(line_style["color"])
+        if abs(label_y - baseline_value) > 0.001:
+            figure.add_shape(
+                type="line",
                 xref="paper",
                 yref="y",
-                x=1.01,
-                y=baseline_value,
-                text=f"{metric_label} {level}: {baseline_value:.1%}",
-                showarrow=False,
-                xanchor="left",
-                yanchor="middle",
-                align="left",
-                font={"color": line_style["color"], "size": 12},
-                bgcolor="rgba(255, 253, 248, 0.92)",
+                x0=1.0,
+                y0=baseline_value,
+                x1=1.008,
+                y1=label_y,
+                line={"color": line_color, "width": 1},
             )
+        figure.add_annotation(
+            xref="paper",
+            yref="y",
+            x=1.01,
+            y=label_y,
+            text=f"{label['metric_label']} {label['level']}: {baseline_value:.1%}",
+            showarrow=False,
+            xanchor="left",
+            yanchor="middle",
+            align="left",
+            font={"color": line_color, "size": 12},
+            bgcolor="rgba(255, 253, 248, 0.92)",
+        )
+
+
+def spread_benchmark_label_positions(
+    values: list[float],
+    *,
+    min_gap: float,
+    lower: float,
+    upper: float,
+) -> list[float]:
+    """Return y positions that preserve order while giving benchmark labels room."""
+    if not values:
+        return []
+
+    indexed_values = sorted(enumerate(values), key=lambda item: item[1])
+    positioned: list[tuple[int, float]] = []
+    previous_y: float | None = None
+    for original_index, value in indexed_values:
+        y = min(max(value, lower), upper)
+        if previous_y is not None and y - previous_y < min_gap:
+            y = previous_y + min_gap
+        positioned.append((original_index, y))
+        previous_y = y
+
+    overflow = positioned[-1][1] - upper
+    if overflow > 0:
+        positioned = [(index, y - overflow) for index, y in positioned]
+        for reverse_index in range(len(positioned) - 2, -1, -1):
+            next_y = positioned[reverse_index + 1][1]
+            current_index, current_y = positioned[reverse_index]
+            if next_y - current_y < min_gap:
+                positioned[reverse_index] = (current_index, next_y - min_gap)
+
+    underflow = lower - positioned[0][1]
+    if underflow > 0:
+        positioned = [(index, y + underflow) for index, y in positioned]
+
+    by_original_index = {index: y for index, y in positioned}
+    return [by_original_index[index] for index in range(len(values))]
 
 
 def tier_from_quantiles(series: pd.Series) -> pd.Categorical:
