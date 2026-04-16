@@ -1005,13 +1005,24 @@ def build_outcome_probability_plot(
     title: str,
     bin_size_pct: int,
     min_matches_per_bin: int,
+    benchmark_df: pd.DataFrame | None = None,
+    selected_benchmark_levels: list[str] | None = None,
+    player_order: list[str] | None = None,
+    player_column: str = "player",
 ) -> go.Figure | None:
     """Plot logistic-regression outcome probability plus observed-bin context."""
     required_columns = [metric_column, success_column, failure_column]
     if chart_df.empty or any(column not in chart_df.columns for column in required_columns):
         return None
 
-    plot_df = chart_df[required_columns].copy()
+    extra_columns = [player_column] if player_column in chart_df.columns else []
+    metric_spec = serve_probability_metric_spec(metric_label)
+    if metric_spec:
+        for column in [metric_spec["numerator"], metric_spec["denominator"]]:
+            if isinstance(column, str) and column in chart_df.columns and column not in extra_columns:
+                extra_columns.append(column)
+
+    plot_df = chart_df[required_columns + extra_columns].copy()
     plot_df[metric_column] = pd.to_numeric(plot_df[metric_column], errors="coerce")
     plot_df[success_column] = pd.to_numeric(plot_df[success_column], errors="coerce").fillna(0.0)
     plot_df[failure_column] = pd.to_numeric(plot_df[failure_column], errors="coerce").fillna(0.0)
@@ -1127,6 +1138,93 @@ def build_outcome_probability_plot(
             ),
         ),
     )
+    benchmark_points = build_serve_probability_benchmark_points(
+        metric_label,
+        benchmark_df if benchmark_df is not None else pd.DataFrame(),
+        selected_benchmark_levels or [],
+    )
+    for level_index, point in enumerate(benchmark_points):
+        baseline_rate = float(point["Rate"])
+        line_style = benchmark_line_style(str(point["Level"]), level_index)
+        predicted_at_baseline = float(
+            model.predict_proba(scaler.transform(np.array([[baseline_rate]])))[:, 1][0]
+        )
+        figure.add_vline(
+            x=baseline_rate,
+            line_dash=line_style["dash"],
+            line_color=line_style["color"],
+            opacity=0.85,
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=[baseline_rate],
+                y=[predicted_at_baseline],
+                mode="markers",
+                name=f"{point['Level']} benchmark",
+                marker=dict(
+                    color=line_style["color"],
+                    size=10,
+                    symbol="line-ns-open",
+                    line=dict(width=2),
+                ),
+                hovertemplate=(
+                    str(point["Level"])
+                    + " "
+                    + metric_label
+                    + ": %{x:.1%}<br>"
+                    + "Predicted "
+                    + outcome_label.lower()
+                    + ": %{y:.1%}<extra></extra>"
+                ),
+                showlegend=False,
+            )
+        )
+
+    player_points = build_serve_probability_player_points(
+        plot_df,
+        metric_label=metric_label,
+        metric_column=metric_column,
+        success_column=success_column,
+        failure_column=failure_column,
+        player_column=player_column,
+        player_order=player_order,
+    )
+    if not player_points.empty:
+        player_points["Predicted Probability"] = model.predict_proba(
+            scaler.transform(player_points[["Rate"]].to_numpy())
+        )[:, 1]
+        figure.add_trace(
+            go.Scatter(
+                x=player_points["Rate"],
+                y=player_points["Observed Probability"],
+                mode="markers+text",
+                name="Player performance",
+                text=player_points["Player"],
+                textposition="top center",
+                marker=dict(
+                    color=COLORBLIND_SAFE_CHART_COLORS["accent_red_dark"],
+                    size=12,
+                    symbol="diamond",
+                    line=dict(color="#FFFDF8", width=1),
+                ),
+                customdata=player_points[
+                    ["Player", "Matches", "Trials", "Predicted Probability"]
+                ].to_numpy(),
+                hovertemplate=(
+                    "%{customdata[0]}<br>"
+                    + metric_label
+                    + ": %{x:.1%}<br>"
+                    + "Actual "
+                    + outcome_label.lower()
+                    + ": %{y:.1%}<br>"
+                    + "Predicted "
+                    + outcome_label.lower()
+                    + ": %{customdata[3]:.1%}<br>"
+                    + "Matches: %{customdata[1]:,.0f}<br>"
+                    + "Trials: %{customdata[2]:,.0f}<extra></extra>"
+                ),
+            )
+        )
 
     apply_accessible_figure_style(figure, title=title, height=420)
     figure.update_layout(
@@ -1144,6 +1242,20 @@ def build_outcome_probability_plot(
         tickformat=".0%",
         range=[0, 1],
     )
+    if benchmark_points:
+        for annotation_index, point in enumerate(benchmark_points):
+            figure.add_annotation(
+                x=float(point["Rate"]),
+                y=1.0,
+                xref="x",
+                yref="paper",
+                text=f"{point['Level']}: {float(point['Rate']):.1%}",
+                showarrow=False,
+                yanchor="bottom",
+                textangle=-90 if annotation_index % 2 else 0,
+                font={"size": 11},
+                bgcolor="rgba(255, 253, 248, 0.86)",
+            )
     return figure
 
 
@@ -1344,6 +1456,123 @@ def render_player_chart_grid(
                 )
                 rendered = True
     return rendered
+
+
+def serve_probability_metric_spec(metric_label: str) -> dict[str, object] | None:
+    """Return the benchmark spec that matches a serve probability x-axis metric."""
+    for spec in BENCHMARK_SPECS:
+        if spec.get("app_label") == metric_label:
+            return spec
+    return None
+
+
+def build_serve_probability_benchmark_points(
+    metric_label: str,
+    benchmark_df: pd.DataFrame,
+    selected_levels: list[str],
+) -> list[dict[str, object]]:
+    """Return selected benchmark x-axis rates for a serve probability metric."""
+    if benchmark_df.empty or not selected_levels:
+        return []
+
+    metric_spec = serve_probability_metric_spec(metric_label)
+    if not metric_spec:
+        return []
+
+    workbook_metric = str(metric_spec["workbook_metric"])
+    lookup = benchmark_lookup(benchmark_df)
+    if workbook_metric not in lookup:
+        return []
+
+    points: list[dict[str, object]] = []
+    for level in selected_levels:
+        baseline_value = lookup[workbook_metric].get(level)
+        if baseline_value is None or not np.isfinite(baseline_value):
+            continue
+        points.append(
+            {
+                "Level": level,
+                "Metric": workbook_metric,
+                "Rate": min(max(float(baseline_value), 0.0), 1.0),
+            }
+        )
+    return points
+
+
+def build_serve_probability_player_points(
+    chart_df: pd.DataFrame,
+    *,
+    metric_label: str,
+    metric_column: str,
+    success_column: str,
+    failure_column: str,
+    player_column: str,
+    player_order: list[str] | None = None,
+) -> pd.DataFrame:
+    """Aggregate selected player x/y positions for serve probability charts."""
+    required_columns = [metric_column, success_column, failure_column, player_column]
+    if chart_df.empty or any(column not in chart_df.columns for column in required_columns):
+        return pd.DataFrame()
+
+    if player_order is not None:
+        if not player_order:
+            return pd.DataFrame()
+        chart_df = chart_df[chart_df[player_column].isin(player_order)].copy()
+        if chart_df.empty:
+            return pd.DataFrame()
+
+    metric_spec = serve_probability_metric_spec(metric_label)
+    numerator_column = str(metric_spec["numerator"]) if metric_spec else ""
+    denominator_column = str(metric_spec["denominator"]) if metric_spec else ""
+    can_weight_rate = (
+        numerator_column in chart_df.columns
+        and denominator_column in chart_df.columns
+    )
+
+    rows: list[dict[str, object]] = []
+    for player_name, player_df in chart_df.groupby(player_column, dropna=False):
+        player_df = player_df.copy()
+        successes = pd.to_numeric(player_df[success_column], errors="coerce").fillna(0.0).sum()
+        failures = pd.to_numeric(player_df[failure_column], errors="coerce").fillna(0.0).sum()
+        trials = successes + failures
+        if trials <= 0:
+            continue
+
+        if can_weight_rate:
+            numerator = pd.to_numeric(player_df[numerator_column], errors="coerce").fillna(0.0).sum()
+            denominator = pd.to_numeric(player_df[denominator_column], errors="coerce").fillna(0.0).sum()
+            rate = float(numerator / denominator) if denominator else np.nan
+        else:
+            rate = pd.to_numeric(player_df[metric_column], errors="coerce").mean()
+
+        if pd.isna(rate) or not np.isfinite(rate):
+            continue
+
+        rows.append(
+            {
+                "Player": str(player_name),
+                "Matches": int(len(player_df)),
+                "Trials": float(trials),
+                "Successes": float(successes),
+                "Failures": float(failures),
+                "Rate": min(max(float(rate), 0.0), 1.0),
+                "Observed Probability": float(successes / trials),
+            }
+        )
+
+    player_points = pd.DataFrame(rows)
+    if player_points.empty:
+        return player_points
+
+    if player_order:
+        rank = {player: index for index, player in enumerate(player_order)}
+        player_points["_player_sort"] = player_points["Player"].map(rank).fillna(len(rank))
+        player_points = player_points.sort_values(["_player_sort", "Player"]).drop(
+            columns="_player_sort"
+        )
+    else:
+        player_points = player_points.sort_values(["Matches", "Player"], ascending=[False, True])
+    return player_points.reset_index(drop=True)
 
 
 def benchmark_lookup(benchmark_df: pd.DataFrame) -> dict[str, dict[str, float]]:
@@ -3776,6 +4005,9 @@ with tabs[5]:
                     title=f"{spec['label']} vs {outcome_lens}",
                     bin_size_pct=bin_size_pct,
                     min_matches_per_bin=min_matches_per_bin,
+                    benchmark_df=benchmark_df,
+                    selected_benchmark_levels=selected_baseline_levels,
+                    player_order=selected_players,
                 )
                 if figure:
                     st.plotly_chart(
@@ -3797,7 +4029,8 @@ with tabs[5]:
 
     if rendered_bin_chart:
         st.markdown(
-            "The red line is the logistic-regression probability curve for the selected outcome lens."
+            "The red line is the logistic-regression probability curve for the selected outcome lens. "
+            "Vertical lines are selected benchmarks, and diamonds are player performance."
         )
 
 with tabs[10]:
