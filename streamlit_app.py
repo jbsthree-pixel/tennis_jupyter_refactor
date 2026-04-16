@@ -93,6 +93,40 @@ BENCHMARK_SPECS = [
         "denominator": "second_serve_attempt",
     },
     {
+        "workbook_metric": "Serve Quality - 1st serve",
+        "app_label": "Serve Quality - 1st serve",
+        "table_column": None,
+        "components": [
+            {
+                "workbook_metric": "1st Serve In",
+                "numerator": "first_serve_in",
+                "denominator": "first_serve_attempt",
+            },
+            {
+                "workbook_metric": "1st Serve Points Won",
+                "numerator": "first_serve_won",
+                "denominator": "first_serve_in",
+            },
+        ],
+    },
+    {
+        "workbook_metric": "Serve Quality - 2nd serve",
+        "app_label": "Serve Quality - 2nd serve",
+        "table_column": None,
+        "components": [
+            {
+                "workbook_metric": "2nd Serve In",
+                "numerator": "second_serve_in",
+                "denominator": "second_serve_attempt",
+            },
+            {
+                "workbook_metric": "2nd Serve Points Won",
+                "numerator": "second_serve_won",
+                "denominator": "second_serve_attempt",
+            },
+        ],
+    },
+    {
         "workbook_metric": "1st Serves Unreturned",
         "app_label": None,
         "table_column": "1SNR %",
@@ -501,6 +535,8 @@ def format_plain_language_feature_name(feature: str) -> str:
     replacements = {
         "1st Serve In %": "First-serve rate",
         "1st Serve Won %": "First-serve points won",
+        "Serve Quality - 1st serve": "First-serve quality",
+        "Serve Quality - 2nd serve": "Second-serve quality",
         "2nd Serve Won %": "Second-serve points won",
         "Ace %": "Ace rate",
         "DF %": "Double-fault rate",
@@ -1018,8 +1054,8 @@ def build_outcome_probability_plot(
     extra_columns = [player_column] if player_column in chart_df.columns else []
     metric_spec = serve_probability_metric_spec(metric_label)
     if metric_spec:
-        for column in [metric_spec["numerator"], metric_spec["denominator"]]:
-            if isinstance(column, str) and column in chart_df.columns and column not in extra_columns:
+        for column in benchmark_spec_source_columns(metric_spec):
+            if column in chart_df.columns and column not in extra_columns:
                 extra_columns.append(column)
 
     plot_df = chart_df[required_columns + extra_columns].copy()
@@ -1466,6 +1502,62 @@ def serve_probability_metric_spec(metric_label: str) -> dict[str, object] | None
     return None
 
 
+def benchmark_spec_source_columns(spec: dict[str, object]) -> list[str]:
+    """Return dataframe columns needed to calculate a benchmark spec from totals."""
+    if "components" in spec:
+        columns: list[str] = []
+        components = spec.get("components", [])
+        if not isinstance(components, list):
+            return columns
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            for key in ["numerator", "denominator"]:
+                value = component.get(key)
+                if isinstance(value, str) and value not in columns:
+                    columns.append(value)
+        return columns
+
+    return [
+        str(spec[key])
+        for key in ["numerator", "denominator"]
+        if isinstance(spec.get(key), str)
+    ]
+
+
+def benchmark_spec_rate_from_totals(totals: pd.DataFrame, spec: dict[str, object]) -> float | None:
+    """Calculate a simple or derived benchmark rate from an already filtered dataframe."""
+    if "components" in spec:
+        rate = 1.0
+        components = spec.get("components", [])
+        if not isinstance(components, list):
+            return None
+        for component in components:
+            if not isinstance(component, dict):
+                return None
+            numerator_column = component.get("numerator")
+            denominator_column = component.get("denominator")
+            if not isinstance(numerator_column, str) or not isinstance(denominator_column, str):
+                return None
+            if numerator_column not in totals.columns or denominator_column not in totals.columns:
+                return None
+            numerator = pd.to_numeric(totals[numerator_column], errors="coerce").fillna(0).sum()
+            denominator = pd.to_numeric(totals[denominator_column], errors="coerce").fillna(0).sum()
+            component_rate = float(numerator / denominator) if denominator else 0.0
+            rate *= component_rate
+        return float(rate)
+
+    numerator_column = spec.get("numerator")
+    denominator_column = spec.get("denominator")
+    if not isinstance(numerator_column, str) or not isinstance(denominator_column, str):
+        return None
+    if numerator_column not in totals.columns or denominator_column not in totals.columns:
+        return None
+    numerator = pd.to_numeric(totals[numerator_column], errors="coerce").fillna(0).sum()
+    denominator = pd.to_numeric(totals[denominator_column], errors="coerce").fillna(0).sum()
+    return float(numerator / denominator) if denominator else 0.0
+
+
 def build_serve_probability_benchmark_points(
     metric_label: str,
     benchmark_df: pd.DataFrame,
@@ -1479,14 +1571,27 @@ def build_serve_probability_benchmark_points(
     if not metric_spec:
         return []
 
-    workbook_metric = str(metric_spec["workbook_metric"])
     lookup = benchmark_lookup(benchmark_df)
-    if workbook_metric not in lookup:
-        return []
+    workbook_metric = str(metric_spec["workbook_metric"])
 
     points: list[dict[str, object]] = []
     for level in selected_levels:
-        baseline_value = lookup[workbook_metric].get(level)
+        baseline_value = lookup.get(workbook_metric, {}).get(level)
+        if baseline_value is None and "components" in metric_spec:
+            baseline_value = 1.0
+            components = metric_spec.get("components", [])
+            if not isinstance(components, list):
+                continue
+            for component in components:
+                if not isinstance(component, dict):
+                    baseline_value = None
+                    break
+                component_metric = str(component.get("workbook_metric", ""))
+                component_value = lookup.get(component_metric, {}).get(level)
+                if component_value is None or not np.isfinite(component_value):
+                    baseline_value = None
+                    break
+                baseline_value *= float(component_value)
         if baseline_value is None or not np.isfinite(baseline_value):
             continue
         points.append(
@@ -1522,12 +1627,8 @@ def build_serve_probability_player_points(
             return pd.DataFrame()
 
     metric_spec = serve_probability_metric_spec(metric_label)
-    numerator_column = str(metric_spec["numerator"]) if metric_spec else ""
-    denominator_column = str(metric_spec["denominator"]) if metric_spec else ""
-    can_weight_rate = (
-        numerator_column in chart_df.columns
-        and denominator_column in chart_df.columns
-    )
+    source_columns = benchmark_spec_source_columns(metric_spec) if metric_spec else []
+    can_weight_rate = bool(source_columns) and all(column in chart_df.columns for column in source_columns)
 
     rows: list[dict[str, object]] = []
     for player_name, player_df in chart_df.groupby(player_column, dropna=False):
@@ -1538,10 +1639,9 @@ def build_serve_probability_player_points(
         if trials <= 0:
             continue
 
-        if can_weight_rate:
-            numerator = pd.to_numeric(player_df[numerator_column], errors="coerce").fillna(0.0).sum()
-            denominator = pd.to_numeric(player_df[denominator_column], errors="coerce").fillna(0.0).sum()
-            rate = float(numerator / denominator) if denominator else np.nan
+        if can_weight_rate and metric_spec:
+            calculated_rate = benchmark_spec_rate_from_totals(player_df, metric_spec)
+            rate = calculated_rate if calculated_rate is not None else np.nan
         else:
             rate = pd.to_numeric(player_df[metric_column], errors="coerce").mean()
 
@@ -1607,11 +1707,10 @@ def aggregate_benchmark_metrics(chart_df: pd.DataFrame) -> dict[str, float]:
 
     totals = chart_df.copy()
     for spec in BENCHMARK_SPECS:
-        if spec["numerator"] not in totals.columns or spec["denominator"] not in totals.columns:
+        rate = benchmark_spec_rate_from_totals(totals, spec)
+        if rate is None:
             continue
-        numerator = pd.to_numeric(totals[spec["numerator"]], errors="coerce").fillna(0).sum()
-        denominator = pd.to_numeric(totals[spec["denominator"]], errors="coerce").fillna(0).sum()
-        values[spec["workbook_metric"]] = float(numerator / denominator) if denominator else 0.0
+        values[str(spec["workbook_metric"])] = rate
 
     return values
 
@@ -3963,6 +4062,14 @@ with tabs[5]:
         {
             "label": "2nd Serve Won %",
             "metric_column": "2nd Serve Won %",
+        },
+        {
+            "label": "Serve Quality - 1st serve",
+            "metric_column": "Serve Quality - 1st serve",
+        },
+        {
+            "label": "Serve Quality - 2nd serve",
+            "metric_column": "Serve Quality - 2nd serve",
         },
     ]
 

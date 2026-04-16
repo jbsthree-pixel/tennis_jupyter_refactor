@@ -59,6 +59,29 @@ def add_match_rate_columns(df: pd.DataFrame) -> pd.DataFrame:
     for rate_label, numerator_column, denominator_column in rate_specs:
         if numerator_column in out.columns and denominator_column in out.columns:
             out[rate_label] = safe_ratio(out[numerator_column], out[denominator_column])
+    quality_specs = [
+        (
+            "Serve Quality - 1st serve",
+            ("first_serve_in", "first_serve_attempt"),
+            ("first_serve_won", "first_serve_in"),
+        ),
+        (
+            "Serve Quality - 2nd serve",
+            ("second_serve_in", "second_serve_attempt"),
+            ("second_serve_won", "second_serve_attempt"),
+        ),
+    ]
+    for quality_label, in_rate_columns, won_rate_columns in quality_specs:
+        in_numerator, in_denominator = in_rate_columns
+        won_numerator, won_denominator = won_rate_columns
+        if all(
+            column in out.columns
+            for column in [in_numerator, in_denominator, won_numerator, won_denominator]
+        ):
+            out[quality_label] = (
+                safe_ratio(out[in_numerator], out[in_denominator])
+                * safe_ratio(out[won_numerator], out[won_denominator])
+            )
     return out
 
 
