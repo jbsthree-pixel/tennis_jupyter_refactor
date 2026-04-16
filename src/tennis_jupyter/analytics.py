@@ -17,6 +17,29 @@ from .pipeline.summary import (
 from .shared import safe_ratio
 
 
+OPPONENT_TEAM_GROUPS = {
+    "ACC Teams": {
+        "Boston College",
+        "California",
+        "Clemson",
+        "Duke",
+        "Florida State",
+        "Georgia Tech",
+        "Louisville",
+        "Miami",
+        "Notre Dame",
+        "Pittsburgh",
+        "SMU",
+        "Stanford",
+        "Syracuse",
+        "UNC",
+        "Virginia",
+        "Virginia Tech",
+        "Wake Forest",
+    },
+}
+
+
 def add_match_rate_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Return a copy with commonly reused serve/return rate columns added."""
     out = df.copy()
@@ -70,7 +93,9 @@ def filter_matches(
         filtered = filtered[filtered["Match Month Name"] == month_name]
     if opp_team and opp_team != "All":
         normalized = filtered["opp_team"].fillna("").astype(str).str.strip()
-        if opp_team == "None Listed":
+        if opp_team in OPPONENT_TEAM_GROUPS:
+            filtered = filtered[normalized.isin(OPPONENT_TEAM_GROUPS[opp_team])]
+        elif opp_team == "None Listed":
             filtered = filtered[normalized == ""]
         else:
             filtered = filtered[normalized == opp_team]
@@ -180,7 +205,10 @@ def available_filter_values(df: pd.DataFrame) -> dict[str, list[str]]:
         "players": ["All"] + sorted(season_df["player"].dropna().astype(str).unique().tolist()),
         "years": ["All"] + [str(year) for year in years],
         "months": ["All"] + months,
-        "opp_teams": ["All"] + (["None Listed"] if has_blank_opp else []) + opp_teams,
+        "opp_teams": ["All"]
+        + list(OPPONENT_TEAM_GROUPS)
+        + (["None Listed"] if has_blank_opp else [])
+        + opp_teams,
         "opponent_schools": ["All"]
         + ([NO_SCHOOL_LISTED] if has_no_school else [])
         + opponent_schools,
