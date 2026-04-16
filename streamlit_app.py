@@ -2884,8 +2884,8 @@ st.markdown(
 )
 st.caption("Cross-platform local browser app for Windows and macOS.")
 
-default_csv = DATA_INPUT_DIR / "team_singles_stats.csv.gz"
-legacy_default_csv = DATA_INPUT_DIR / "team_singles_stats.csv"
+default_csv = DATA_INPUT_DIR / "singles_stats.csv.gz"
+legacy_default_csv = DATA_INPUT_DIR / "singles_stats.csv"
 default_benchmark_xlsx = DATA_INPUT_DIR / "Tour Data 2025.xlsx"
 local_source_paths = available_source_csvs(DATA_INPUT_DIR)
 preferred_source_path = default_csv
