@@ -48,6 +48,9 @@ SERVE_TREND_METRICS = [
     ("2nd Serve In %", "second_serve_in", "second_serve_attempt", COLORBLIND_SAFE_CHART_COLORS["accent_rose"]),
     ("2nd Serve Won %", "second_serve_won", "second_serve_attempt", COLORBLIND_SAFE_CHART_COLORS["accent_gray"]),
     ("Double Fault %", "double_fault", "second_serve_attempt", COLORBLIND_SAFE_CHART_COLORS["accent_black"]),
+    ("Ace %", "ace", "first_serve_attempt", COLORBLIND_SAFE_CHART_COLORS["accent_taupe"]),
+    ("Unforced Error %", "unforced_error", "total_point", COLORBLIND_SAFE_CHART_COLORS["accent_red"]),
+    ("Forced Error %", "forced_error", "total_point", COLORBLIND_SAFE_CHART_COLORS["accent_gray"]),
 ]
 
 
@@ -117,6 +120,11 @@ RAW_FIELD_FORMULAS = {
     "winner": "Count where outcome == Winner and endingPlayer == 0.",
     "ace": "Count where outcome == Ace, server == 0, and point was won.",
     "unforced_error": "Count where outcome == UnforcedError and endingPlayer == 0.",
+    "forced_error": "Count where outcome == ForcedError and endingPlayer == 0.",
+    "opp_ace": "Count where outcome == Ace, server == 1, and point was lost.",
+    "opp_unforced_error": "Count where outcome == UnforcedError and endingPlayer == 2.",
+    "opp_forced_error": "Count where outcome == ForcedError and endingPlayer == 2.",
+    "total_point": "Count of points played by the player in either service or return role.",
     "break_point_total": "Count of break points earned while returning.",
     "break_point_won": "Count of break points converted while returning.",
     "break_point_faced": "Count of break points faced while serving.",

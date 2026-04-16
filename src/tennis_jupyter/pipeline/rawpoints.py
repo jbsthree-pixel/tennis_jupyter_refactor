@@ -118,6 +118,13 @@ def add_rawpoints_columns(df: pd.DataFrame) -> pd.DataFrame:
     df["unforced_error"] = (
         (outcome == "UnforcedError") & (ending_player == 0)
     ).astype("int64")
+    df["forced_error"] = ((outcome == "ForcedError") & (ending_player == 0)).astype("int64")
+    df["opp_ace"] = ((outcome == "Ace") & (df["server"] == 1) & (~point_won)).astype("int64")
+    df["opp_unforced_error"] = (
+        (outcome == "UnforcedError") & (ending_player == 2)
+    ).astype("int64")
+    df["opp_forced_error"] = ((outcome == "ForcedError") & (ending_player == 2)).astype("int64")
+    df["total_point"] = (is_server | is_returner).astype("int64")
 
     df["break_point_total"] = (break_point & is_returner).astype("int64")
     df["break_point_won"] = (break_point & is_returner & point_won).astype("int64")

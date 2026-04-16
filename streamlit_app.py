@@ -93,6 +93,30 @@ BENCHMARK_SPECS = [
         "denominator": "second_serve_attempt",
     },
     {
+        "workbook_metric": "Ace %",
+        "app_label": "Ace %",
+        "table_column": "Ace %",
+        "numerator": "ace",
+        "denominator": "first_serve_attempt",
+        "workbook_aliases": ["Aces", "Ace Rate"],
+    },
+    {
+        "workbook_metric": "Unforced Error %",
+        "app_label": "Unforced Error %",
+        "table_column": None,
+        "numerator": "unforced_error",
+        "denominator": "total_point",
+        "workbook_aliases": ["Unforced Errors %", "Unforced Error Rate"],
+    },
+    {
+        "workbook_metric": "Forced Error %",
+        "app_label": "Forced Error %",
+        "table_column": None,
+        "numerator": "forced_error",
+        "denominator": "total_point",
+        "workbook_aliases": ["Forced Errors %", "Forced Error Rate"],
+    },
+    {
         "workbook_metric": "Serve Quality - 1st serve",
         "app_label": "Serve Quality - 1st serve",
         "table_column": None,
@@ -190,6 +214,21 @@ OPPONENT_BENCHMARK_SPECS = [
         "denominator": {"sum": ("second_serve_return_opportunity", "opp_double_fault")},
     },
     {
+        "workbook_metric": "Ace %",
+        "numerator": "opp_ace",
+        "denominator": "return_point",
+    },
+    {
+        "workbook_metric": "Unforced Error %",
+        "numerator": "opp_unforced_error",
+        "denominator": "total_point",
+    },
+    {
+        "workbook_metric": "Forced Error %",
+        "numerator": "opp_forced_error",
+        "denominator": "total_point",
+    },
+    {
         "workbook_metric": "1st Serves Unreturned",
         "numerator": ("first_serve_return_opportunity", "first_serve_return_in"),
         "denominator": "first_serve_return_opportunity",
@@ -216,7 +255,7 @@ OPPONENT_BENCHMARK_SPECS = [
     },
 ]
 
-SUMMARY_CACHE_SCHEMA_VERSION = 2
+SUMMARY_CACHE_SCHEMA_VERSION = 3
 
 
 st.set_page_config(page_title="Tennis Match Summary", layout="wide")
@@ -1525,6 +1564,28 @@ def benchmark_spec_source_columns(spec: dict[str, object]) -> list[str]:
     ]
 
 
+def benchmark_spec_workbook_metrics(spec: dict[str, object]) -> list[str]:
+    """Return accepted workbook row names for a benchmark spec."""
+    names = [str(spec["workbook_metric"])]
+    aliases = spec.get("workbook_aliases", [])
+    if isinstance(aliases, list):
+        names.extend(str(alias) for alias in aliases)
+    return names
+
+
+def benchmark_value_for_spec(
+    lookup: dict[str, dict[str, float]],
+    spec: dict[str, object],
+    level: str,
+) -> float | None:
+    """Return a benchmark value from canonical or alias workbook rows."""
+    for metric_name in benchmark_spec_workbook_metrics(spec):
+        baseline_value = lookup.get(metric_name, {}).get(level)
+        if baseline_value is not None:
+            return baseline_value
+    return None
+
+
 def benchmark_spec_rate_from_totals(totals: pd.DataFrame, spec: dict[str, object]) -> float | None:
     """Calculate a simple or derived benchmark rate from an already filtered dataframe."""
     if "components" in spec:
@@ -1551,10 +1612,18 @@ def benchmark_spec_rate_from_totals(totals: pd.DataFrame, spec: dict[str, object
     denominator_column = spec.get("denominator")
     if not isinstance(numerator_column, str) or not isinstance(denominator_column, str):
         return None
-    if numerator_column not in totals.columns or denominator_column not in totals.columns:
+    if numerator_column not in totals.columns:
         return None
     numerator = pd.to_numeric(totals[numerator_column], errors="coerce").fillna(0).sum()
-    denominator = pd.to_numeric(totals[denominator_column], errors="coerce").fillna(0).sum()
+    if denominator_column in totals.columns:
+        denominator = pd.to_numeric(totals[denominator_column], errors="coerce").fillna(0).sum()
+    elif denominator_column == "total_point" and {"service_point", "return_point"}.issubset(totals.columns):
+        denominator = (
+            pd.to_numeric(totals["service_point"], errors="coerce").fillna(0)
+            + pd.to_numeric(totals["return_point"], errors="coerce").fillna(0)
+        ).sum()
+    else:
+        return None
     return float(numerator / denominator) if denominator else 0.0
 
 
@@ -1576,7 +1645,7 @@ def build_serve_probability_benchmark_points(
 
     points: list[dict[str, object]] = []
     for level in selected_levels:
-        baseline_value = lookup.get(workbook_metric, {}).get(level)
+        baseline_value = benchmark_value_for_spec(lookup, metric_spec, level)
         if baseline_value is None and "components" in metric_spec:
             baseline_value = 1.0
             components = metric_spec.get("components", [])
@@ -1739,6 +1808,18 @@ def _summed_series_value(
         right_values = pd.to_numeric(totals[right], errors="coerce").fillna(0)
         return float((left_values - right_values).sum())
 
+    if (
+        column_or_expression == "total_point"
+        and "total_point" not in totals.columns
+        and {"service_point", "return_point"}.issubset(totals.columns)
+    ):
+        return float(
+            (
+                pd.to_numeric(totals["service_point"], errors="coerce").fillna(0)
+                + pd.to_numeric(totals["return_point"], errors="coerce").fillna(0)
+            ).sum()
+        )
+
     if column_or_expression not in totals.columns:
         return 0.0
     return float(pd.to_numeric(totals[column_or_expression], errors="coerce").fillna(0).sum())
@@ -1893,7 +1974,7 @@ def build_benchmark_snapshot(
     rows: list[dict[str, object]] = []
     for spec in BENCHMARK_SPECS:
         metric_name = spec["workbook_metric"]
-        if metric_name not in lookup or metric_name not in current_values:
+        if metric_name not in current_values:
             continue
 
         row: dict[str, object] = {
@@ -1901,11 +1982,13 @@ def build_benchmark_snapshot(
             "Current": current_values[metric_name],
         }
         for level in selected_levels:
-            if level not in lookup[metric_name]:
+            baseline_value = benchmark_value_for_spec(lookup, spec, level)
+            if baseline_value is None:
                 continue
-            row[level] = lookup[metric_name][level]
-            row[f"vs {level}"] = current_values[metric_name] - lookup[metric_name][level]
-        rows.append(row)
+            row[level] = baseline_value
+            row[f"vs {level}"] = current_values[metric_name] - baseline_value
+        if len(row) > 2:
+            rows.append(row)
 
     return pd.DataFrame(rows)
 
@@ -1921,19 +2004,19 @@ def add_benchmark_lines(
         return
 
     lookup = benchmark_lookup(benchmark_df)
-    metric_to_workbook = {
-        spec["app_label"]: spec["workbook_metric"]
+    metric_to_spec = {
+        str(spec["app_label"]): spec
         for spec in BENCHMARK_SPECS
-        if spec["app_label"]
+        if spec.get("app_label")
     }
 
     labels: list[dict[str, object]] = []
     for metric_label, _, _, _ in selected_metrics:
-        workbook_metric = metric_to_workbook.get(metric_label)
-        if not workbook_metric or workbook_metric not in lookup:
+        metric_spec = metric_to_spec.get(metric_label)
+        if not metric_spec:
             continue
         for level_index, level in enumerate(selected_levels):
-            baseline_value = lookup[workbook_metric].get(level)
+            baseline_value = benchmark_value_for_spec(lookup, metric_spec, level)
             if baseline_value is None:
                 continue
             line_style = benchmark_line_style(level, level_index)
@@ -2107,6 +2190,9 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
         "2nd Serve In %": "diamond",
         "2nd Serve Won %": "triangle-up",
         "Double Fault %": "x",
+        "Ace %": "star",
+        "Unforced Error %": "cross",
+        "Forced Error %": "triangle-down",
     }
 
     top_tickvals: list[int] = []

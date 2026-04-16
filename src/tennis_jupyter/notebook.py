@@ -38,7 +38,11 @@ def plot_serve_trends(df: pd.DataFrame, player: str | None = None) -> None:
                 "first_serve_won",
                 "second_serve_attempt",
                 "second_serve_won",
+                "ace",
                 "double_fault",
+                "unforced_error",
+                "forced_error",
+                "total_point",
             ]
         ]
         .sum()
@@ -62,10 +66,30 @@ def plot_serve_trends(df: pd.DataFrame, player: str | None = None) -> None:
         yearly["double_fault"],
         yearly["second_serve_attempt"],
     )
+    yearly["Ace %"] = safe_ratio(
+        yearly["ace"],
+        yearly["first_serve_attempt"],
+    )
+    yearly["Unforced Error %"] = safe_ratio(
+        yearly["unforced_error"],
+        yearly["total_point"],
+    )
+    yearly["Forced Error %"] = safe_ratio(
+        yearly["forced_error"],
+        yearly["total_point"],
+    )
 
     ax = yearly.plot(
         x="Match Year",
-        y=["1st Serve In %", "1st Serve Won %", "2nd Serve Won %", "Double Fault %"],
+        y=[
+            "1st Serve In %",
+            "1st Serve Won %",
+            "2nd Serve Won %",
+            "Double Fault %",
+            "Ace %",
+            "Unforced Error %",
+            "Forced Error %",
+        ],
         marker="o",
         figsize=(10, 5),
         title="Serve Trends by Year" if player is None else f"Serve Trends by Year: {player}",

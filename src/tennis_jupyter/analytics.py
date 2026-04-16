@@ -50,6 +50,8 @@ def add_match_rate_columns(df: pd.DataFrame) -> pd.DataFrame:
         ("2nd Serve Won %", "second_serve_won", "second_serve_attempt"),
         ("Ace %", "ace", "first_serve_attempt"),
         ("DF %", "double_fault", "second_serve_attempt"),
+        ("Unforced Error %", "unforced_error", "total_point"),
+        ("Forced Error %", "forced_error", "total_point"),
         ("1st Serve Not Returned %", "first_serve_not_returned", "first_serve_in"),
         ("1st Return In %", "first_serve_return_in", "first_serve_return_opportunity"),
         ("1st Return Won %", "first_serve_return_won", "first_serve_return_opportunity"),
@@ -323,6 +325,9 @@ def build_player_comparison_summary(
         "break_point_won",
         "break_point_faced",
         "break_point_saved",
+        "unforced_error",
+        "forced_error",
+        "total_point",
     ]
     for column in required_defaults:
         if column not in calc_df.columns:
@@ -449,6 +454,9 @@ def build_serve_return_match_stats(df: pd.DataFrame) -> pd.DataFrame:
 
     defaults = [
         "ace",
+        "unforced_error",
+        "forced_error",
+        "total_point",
         "double_fault",
         "first_serve_attempt",
         "first_serve_in",
@@ -611,6 +619,12 @@ def build_game_level_summary(
         "second_serve_won",
         "double_fault",
         "ace",
+        "unforced_error",
+        "forced_error",
+        "opp_ace",
+        "opp_unforced_error",
+        "opp_forced_error",
+        "total_point",
         "first_serve_not_returned",
         "first_serve_return_opportunity",
         "first_serve_return_in",
