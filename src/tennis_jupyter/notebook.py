@@ -11,7 +11,7 @@ import pandas as pd
 from .analytics import filter_matches, summarize_key_insights
 from .pipeline import build_match_summary
 from .reporting import write_excel_report
-from .shared import output_path, safe_ratio
+from .shared import autoscale_rate_axis_range, output_path, safe_ratio
 
 MATCH_WATCH_URL_PREFIX = "https://www.cizrtennis.com/userMatches//watch/"
 
@@ -96,7 +96,21 @@ def plot_serve_trends(df: pd.DataFrame, player: str | None = None) -> None:
     )
     ax.set_xlabel("Year")
     ax.set_ylabel("Rate")
-    ax.set_ylim(0, 1)
+    axis_range = autoscale_rate_axis_range(
+        yearly[
+            [
+                "1st Serve In %",
+                "1st Serve Won %",
+                "2nd Serve Won %",
+                "Double Fault %",
+                "Ace %",
+                "Unforced Error %",
+                "Forced Error %",
+            ]
+        ].to_numpy().ravel()
+    )
+    if axis_range:
+        ax.set_ylim(*axis_range)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
 

@@ -44,7 +44,11 @@ from tennis_jupyter.constants import (  # noqa: E402
 )
 from tennis_jupyter.notebook import build_match_watch_url, load_match_summary  # noqa: E402
 from tennis_jupyter.reporting import write_excel_report  # noqa: E402
-from tennis_jupyter.shared import safe_ratio  # noqa: E402
+from tennis_jupyter.shared import (  # noqa: E402
+    autoscale_rate_axis_range,
+    match_sequence_axis_range,
+    safe_ratio,
+)
 
 
 BENCHMARK_LEVEL_DISPLAY_ORDER = [
@@ -2011,6 +2015,7 @@ def add_benchmark_lines(
     }
 
     labels: list[dict[str, object]] = []
+    baseline_values: list[float] = []
     for metric_label, _, _, _ in selected_metrics:
         metric_spec = metric_to_spec.get(metric_label)
         if not metric_spec:
@@ -2019,6 +2024,7 @@ def add_benchmark_lines(
             baseline_value = benchmark_value_for_spec(lookup, metric_spec, level)
             if baseline_value is None:
                 continue
+            baseline_values.append(float(baseline_value))
             line_style = benchmark_line_style(level, level_index)
             figure.add_hline(
                 y=baseline_value,
@@ -2074,6 +2080,11 @@ def add_benchmark_lines(
             font={"color": line_color, "size": 12},
             bgcolor="rgba(255, 253, 248, 0.92)",
         )
+
+    trace_values = [trace.y for trace in figure.data if hasattr(trace, "y")]
+    y_range = autoscale_rate_axis_range(*trace_values, baseline_values, label_positions)
+    if y_range:
+        figure.update_yaxes(range=y_range)
 
 
 def spread_benchmark_label_positions(
@@ -2232,8 +2243,10 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
             subplot_titles=tuple(f"{result_label}: Serve Statistics Trend" for result_label, _ in subsets),
         )
         for row_index, (result_label, subset) in enumerate(subsets, start=1):
+            subplot_values: list[list[float]] = []
             for label, numer, denom, color in selected_metrics:
                 values = safe_ratio(subset[numer], subset[denom]).tolist()
+                subplot_values.append(values)
                 figure.add_trace(
                     go.Scatter(
                         x=subset["Match Sequence"],
@@ -2253,20 +2266,24 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
                 title_text="Match Order (chronological)",
                 tickmode="linear",
                 dtick=1 if len(subset) <= 15 else max(1, len(subset) // 8),
+                range=match_sequence_axis_range(len(subset)),
                 row=row_index,
                 col=1,
             )
+            y_range = autoscale_rate_axis_range(*subplot_values)
             figure.update_yaxes(
                 title_text="Rate",
                 tickformat=".0%",
-                range=[0, 1],
+                range=y_range,
                 row=row_index,
                 col=1,
             )
     else:
         figure = go.Figure()
+        chart_values: list[list[float]] = []
         for label, numer, denom, color in selected_metrics:
             values = safe_ratio(plot_df[numer], plot_df[denom]).tolist()
+            chart_values.append(values)
             figure.add_trace(
                 go.Scatter(
                     x=plot_df["Match Sequence"],
@@ -2302,6 +2319,7 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
             title_text="Match Order (chronological)",
             tickmode="linear",
             dtick=1 if len(plot_df) <= 15 else max(1, len(plot_df) // 8),
+            range=match_sequence_axis_range(len(plot_df)),
         )
     if top_tickvals and top_ticktext and not (split_by_result and "Match Result" in plot_df.columns):
         figure.update_layout(
@@ -2311,12 +2329,17 @@ def plot_metric_line_chart(chart_df: pd.DataFrame, selected_metrics: list[tuple[
                 "tickmode": "array",
                 "tickvals": top_tickvals,
                 "ticktext": top_ticktext,
+                "range": match_sequence_axis_range(len(plot_df)),
                 "title": {"text": "Match Date"},
                 "showgrid": False,
             }
         )
     if not (split_by_result and "Match Result" in plot_df.columns):
-        figure.update_yaxes(title_text="Rate", tickformat=".0%", range=[0, 1])
+        figure.update_yaxes(
+            title_text="Rate",
+            tickformat=".0%",
+            range=autoscale_rate_axis_range(*chart_values),
+        )
     return figure
 
 
