@@ -409,11 +409,6 @@ st.markdown(
             border-bottom-color: var(--accent-red);
         }}
 
-        button[data-baseweb="tab"]:nth-of-type(12) {{
-            cursor: not-allowed;
-            opacity: 0.5;
-            pointer-events: none;
-        }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -3296,6 +3291,235 @@ def build_player_comparison_chart(comparison_df: pd.DataFrame, title: str) -> go
     return figure
 
 
+def available_axis_parameters(df: pd.DataFrame) -> list[str]:
+    """Return numeric match parameters that can be used in the custom axis chart."""
+    excluded_columns = {
+        "_Season Sort",
+        "matchId",
+        "gameId",
+        "set",
+        "game",
+        "Match Year",
+        "Match Month",
+    }
+    preferred_order = [
+        "1st Serve In %",
+        "1st Serve Won %",
+        "2nd Serve In %",
+        "2nd Serve Won %",
+        "Serve Quality - 1st serve",
+        "Serve Quality - 2nd serve",
+        "Ace %",
+        "DF %",
+        "Unforced Error %",
+        "Forced Error %",
+        "1st Serve Not Returned %",
+        "1st Return In %",
+        "1st Return Won %",
+        "2nd Return In %",
+        "2nd Return Won %",
+        "BP Won %",
+        "BP Saved %",
+        "Aces",
+        "Double Faults",
+        "Games Won",
+        "Games Lost",
+        "Sets Won",
+        "Sets Lost",
+        "total_point",
+        "break_point_won",
+        "break_point_saved",
+    ]
+    available: list[str] = []
+    for column in preferred_order:
+        if column in df.columns and pd.to_numeric(df[column], errors="coerce").notna().any():
+            available.append(column)
+
+    numeric_columns = [
+        column
+        for column in df.columns
+        if column not in available
+        and column not in excluded_columns
+        and not column.startswith("_")
+        and pd.to_numeric(df[column], errors="coerce").notna().any()
+    ]
+    return available + sorted(numeric_columns)
+
+
+def axis_parameter_label(parameter: str) -> str:
+    """Return display text for an axis parameter."""
+    display_names = {
+        "DF %": "Double Fault %",
+        "1st Serve Not Returned %": "1SNR %",
+        "total_point": "Total Points",
+        "break_point_won": "Break Points Won",
+        "break_point_saved": "Break Points Saved",
+    }
+    return display_names.get(parameter, parameter)
+
+
+def ensure_axis_parameter_defaults(
+    parameters: list[str],
+    *,
+    key_prefix: str,
+    default_x: str | None = None,
+    default_y: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Initialize and normalize mutually exclusive axis choices."""
+    x_key = f"{key_prefix}_x_parameter"
+    y_key = f"{key_prefix}_y_parameter"
+    if not parameters:
+        st.session_state[x_key] = None
+        st.session_state[y_key] = None
+        return None, None
+
+    if st.session_state.get(x_key) not in parameters:
+        st.session_state[x_key] = default_x if default_x in parameters else parameters[0]
+    if st.session_state.get(y_key) not in parameters:
+        fallback_y = default_y if default_y in parameters else parameters[min(1, len(parameters) - 1)]
+        st.session_state[y_key] = fallback_y
+    if st.session_state.get(x_key) == st.session_state.get(y_key):
+        alternatives = [parameter for parameter in parameters if parameter != st.session_state[x_key]]
+        st.session_state[y_key] = alternatives[0] if alternatives else None
+
+    return st.session_state.get(x_key), st.session_state.get(y_key)
+
+
+def render_axis_parameter_picker(
+    parameters: list[str],
+    *,
+    key_prefix: str,
+    default_x: str | None = None,
+    default_y: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Render mutually exclusive X/Y parameter dropdowns."""
+    x_key = f"{key_prefix}_x_parameter"
+    y_key = f"{key_prefix}_y_parameter"
+    ensure_axis_parameter_defaults(
+        parameters,
+        key_prefix=key_prefix,
+        default_x=default_x,
+        default_y=default_y,
+    )
+
+    x_value = st.session_state.get(x_key)
+    y_value = st.session_state.get(y_key)
+    if x_value not in parameters:
+        x_value = None
+    if y_value not in parameters:
+        y_value = None
+
+    x_options = [None] + [parameter for parameter in parameters if parameter != y_value]
+    y_options = [None] + [parameter for parameter in parameters if parameter != x_value]
+
+    def format_option(value: str | None) -> str:
+        return "None" if value is None else axis_parameter_label(value)
+
+    control_col1, control_col2 = st.columns(2)
+    with control_col1:
+        x_value = st.selectbox(
+            "X axis",
+            x_options,
+            index=x_options.index(x_value) if x_value in x_options else 0,
+            key=x_key,
+            format_func=format_option,
+            help="Change this to release the current X parameter back to the Y-axis choices.",
+        )
+
+    y_options = [None] + [parameter for parameter in parameters if parameter != x_value]
+    if y_value not in y_options:
+        y_value = None
+    with control_col2:
+        y_value = st.selectbox(
+            "Y axis",
+            y_options,
+            index=y_options.index(y_value) if y_value in y_options else 0,
+            key=y_key,
+            format_func=format_option,
+            help="Change this to release the current Y parameter back to the X-axis choices.",
+        )
+
+    return st.session_state.get(x_key), st.session_state.get(y_key)
+
+
+def build_axis_parameter_chart(
+    df: pd.DataFrame,
+    *,
+    x_parameter: str,
+    y_parameter: str,
+    title: str,
+) -> tuple[go.Figure | None, pd.DataFrame]:
+    """Build a scatter chart for the selected axis parameters."""
+    if df.empty or x_parameter not in df.columns or y_parameter not in df.columns:
+        return None, pd.DataFrame()
+
+    hover_columns = [
+        column
+        for column in ["player", "opp", "opp_team", "Match Date", "Match Result", "matchId"]
+        if column in df.columns
+    ]
+    plot_df = df[[x_parameter, y_parameter] + hover_columns].copy()
+    plot_df[x_parameter] = pd.to_numeric(plot_df[x_parameter], errors="coerce")
+    plot_df[y_parameter] = pd.to_numeric(plot_df[y_parameter], errors="coerce")
+    plot_df = plot_df.dropna(subset=[x_parameter, y_parameter])
+    if plot_df.empty:
+        return None, pd.DataFrame()
+
+    if "Match Date" in plot_df.columns:
+        plot_df["Match Date"] = pd.to_datetime(plot_df["Match Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    for column in hover_columns:
+        plot_df[column] = plot_df[column].fillna("").astype(str)
+
+    figure = go.Figure()
+    color_values = list(COLORBLIND_SAFE_CHART_COLORS.values())
+    if "player" in plot_df.columns:
+        player_names = sorted(plot_df["player"].dropna().astype(str).unique())
+    else:
+        player_names = ["Selected Matches"]
+
+    for index, player_name in enumerate(player_names):
+        player_df = (
+            plot_df[plot_df["player"].astype(str) == player_name]
+            if "player" in plot_df.columns
+            else plot_df
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=player_df[x_parameter],
+                y=player_df[y_parameter],
+                mode="markers",
+                name=player_name,
+                marker={
+                    "color": color_values[index % len(color_values)],
+                    "line": {"color": "#ffffff", "width": 1},
+                    "size": 10,
+                },
+                customdata=player_df[hover_columns].to_numpy() if hover_columns else None,
+                hovertemplate=(
+                    f"{axis_parameter_label(x_parameter)}: %{{x:.3f}}<br>"
+                    f"{axis_parameter_label(y_parameter)}: %{{y:.3f}}<br>"
+                    + "<br>".join(
+                        f"{column}: %{{customdata[{idx}]}}"
+                        for idx, column in enumerate(hover_columns)
+                    )
+                    + "<extra>%{fullData.name}</extra>"
+                ),
+            )
+        )
+
+    apply_accessible_figure_style(figure, title=title, height=560)
+    figure.update_layout(
+        legend_title="Player",
+        xaxis_title=axis_parameter_label(x_parameter),
+        yaxis_title=axis_parameter_label(y_parameter),
+    )
+    if "%" in x_parameter or plot_df[x_parameter].between(0, 1).all():
+        figure.update_xaxes(tickformat=".0%")
+    if "%" in y_parameter or plot_df[y_parameter].between(0, 1).all():
+        figure.update_yaxes(tickformat=".0%")
+    return figure, plot_df
+
+
 banner_logo_path = PROJECT_ROOT / "assets" / "ncstate-circle-blk-kowolf.png"
 banner_logo_uri = image_to_data_uri(banner_logo_path)
 banner_logo_html = (
@@ -3493,6 +3717,7 @@ tabs = st.tabs(
         "Pressure Bins",
         "Score-State Performance",
         "Serve / Return Score-State Rates",
+        "Parameter Explorer",
     ]
 )
 
@@ -4558,5 +4783,63 @@ with tabs[10]:
             file_name=f"{selected_rate_score_state_view.lower().replace(' ', '_').replace('%', 'pct')}_score_state_games.csv",
             mime="text/csv",
             width="stretch",
+        )
+
+with tabs[11]:
+    st.subheader(f"Parameter Explorer: {current_scope}")
+    st.caption("Build a match-level scatter chart from any two available numeric parameters.")
+    axis_df = add_match_rate_columns(filtered_df)
+    if {"break_point_won", "break_point_total"}.issubset(axis_df.columns):
+        axis_df["BP Won %"] = safe_ratio(axis_df["break_point_won"], axis_df["break_point_total"])
+    if {"break_point_saved", "break_point_faced"}.issubset(axis_df.columns):
+        axis_df["BP Saved %"] = safe_ratio(axis_df["break_point_saved"], axis_df["break_point_faced"])
+    axis_parameters = available_axis_parameters(axis_df)
+    if len(axis_parameters) < 2:
+        st.info("At least two numeric parameters are needed.")
+    else:
+        x_parameter, y_parameter = ensure_axis_parameter_defaults(
+            axis_parameters,
+            key_prefix="match_axis_explorer",
+            default_x="1st Serve In %",
+            default_y="1st Serve Won %",
+        )
+        if not x_parameter or not y_parameter:
+            st.info("Choose one parameter for each axis to draw the chart.")
+        else:
+            axis_fig, axis_plot_df = build_axis_parameter_chart(
+                axis_df,
+                x_parameter=x_parameter,
+                y_parameter=y_parameter,
+                title=(
+                    f"{axis_parameter_label(x_parameter)} vs "
+                    f"{axis_parameter_label(y_parameter)} ({current_scope})"
+                ),
+            )
+            if axis_fig:
+                st.plotly_chart(
+                    axis_fig,
+                    width="stretch",
+                    key=chart_key(
+                        "axis_explorer",
+                        *base_chart_key_parts,
+                        x_parameter,
+                        y_parameter,
+                    ),
+                )
+                st.download_button(
+                    "Download Parameters CSV",
+                    data=to_csv_bytes(axis_plot_df),
+                    file_name="axis_explorer_matches.csv",
+                    mime="text/csv",
+                    width="stretch",
+                )
+            else:
+                st.info("No matches have numeric values for both selected parameters.")
+        st.markdown("**Parameters**")
+        render_axis_parameter_picker(
+            axis_parameters,
+            key_prefix="match_axis_explorer",
+            default_x="1st Serve In %",
+            default_y="1st Serve Won %",
         )
 
